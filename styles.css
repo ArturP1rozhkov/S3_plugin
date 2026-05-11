@@ -1,0 +1,13 @@
+/* Vault S3 Sync — plugin styles */
+.s3sync-modal-content { display: flex; flex-direction: column; gap: var(--size-4-2); }
+.s3sync-progress {
+  font-family: var(--font-monospace); font-size: var(--font-small);
+  background: var(--background-secondary); border-radius: var(--radius-m);
+  padding: var(--size-4-3); max-height: 300px; overflow-y: auto; white-space: pre-wrap;
+}
+.s3sync-progress-line-ok   { color: var(--color-green); }
+.s3sync-progress-line-warn { color: var(--color-yellow); }
+.s3sync-progress-line-err  { color: var(--color-red); }
+.s3sync-status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--size-4-2) var(--size-4-4); }
+.s3sync-status-label { color: var(--text-muted); font-size: var(--font-small); }
+.s3sync-status-value { font-weight: 600; }

@@ -1,0 +1,15 @@
+# Build output
+main.js
+main.js.map
+
+# Dependencies
+node_modules/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+
+# Logs
+*.log
