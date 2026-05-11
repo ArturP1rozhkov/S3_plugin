@@ -28,7 +28,7 @@ export async function uploadBuffer(
   client: S3Client,
   cfg: S3Config,
   key: string,
-  body: Uint8Array | Buffer,
+  body: Uint8Array,
   contentType: string,
   metadata: Record<string, string> = {}
 ): Promise<void> {
