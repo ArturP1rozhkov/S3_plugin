@@ -1,8 +1,18 @@
-import { App, Notice, TFile, TFolder, normalizePath } from "obsidian";
+// src/engine/cleanup.ts
+
+import { App, TFile, normalizePath } from "obsidian";
 import type { VaultS3Settings } from "../settings";
 import type { SyncState } from "../state";
+import {
+  parseAllRefs,
+  isExternalRef,
+  isAlreadyS3Ref,
+  refExt,
+  refFilename,
+} from "./linkParser";
 import { ATTACHMENT_EXT } from "./fileClassifier";
-import { parseAllRefs, isExternalRef, isAlreadyS3Ref } from "./linkParser";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function isIgnored(path: string, ignoreFolders: string[]): boolean {
   return path.split("/").some((p) => ignoreFolders.includes(p));
@@ -10,141 +20,131 @@ function isIgnored(path: string, ignoreFolders: string[]): boolean {
 
 function isIgnoredFile(name: string, ignoreFiles: string[]): boolean {
   for (const pattern of ignoreFiles) {
-    if (pattern.startsWith("*")) {
-      if (name.endsWith(pattern.slice(1))) return true;
-    } else if (pattern.endsWith("*")) {
-      if (name.startsWith(pattern.slice(0, -1))) return true;
-    } else {
-      if (name === pattern) return true;
-    }
+    if (pattern.startsWith("*") && name.endsWith(pattern.slice(1)))        return true;
+    if (pattern.endsWith("*")   && name.startsWith(pattern.slice(0, -1))) return true;
+    if (name === pattern)                                                    return true;
   }
   return false;
 }
 
-export async function cmdCleanup(
-  app: App,
-  settings: VaultS3Settings,
-  state: SyncState,
-  dryRun = false
-): Promise<{ moved: number; totalSize: number }> {
-  const { attachmentFolders, ignoreFolders, ignoreFiles, trashFolder, s3 } = settings;
+// ── Сбор referenced-файлов из vault ──────────────────────────────────────────
+//
+// Правило: ссылка защищает файл от orphan-детекта если и только если:
+//   • ref имеет attachment-расширение (после стрипинга #anchor и ?query)
+//   • ИЛИ ref — already-S3 URL (не локальный файл — не попадает в orphan)
+//
+// Источники ссылок:
+//   1. metadataCache.embeds / links  — wiki-ссылки (![[file]], [[file]])
+//   2. parseAllRefs по тексту        — HTML-теги и markdown ![](ref)
+//      (Obsidian не кеширует HTML src= атрибуты)
 
-  // ── Collect ALL referenced file identifiers from vault notes ───────────
-  // We collect: bare filename, full ref path, AND track which files are
-  // already uploaded to S3 (present in syncState.processed)
-  const referencedNames = new Set<string>();   // just filename
-  const referencedPaths = new Set<string>();   // full vault-relative path
+async function collectReferencedFilenames(
+  app: App,
+  settings: VaultS3Settings
+): Promise<Set<string>> {
+  const referenced = new Set<string>();
 
   const mdFiles = app.vault.getMarkdownFiles().filter(
-    (f) => !isIgnored(f.path, ignoreFolders)
+    (f) => !isIgnored(f.path, settings.ignoreFolders)
   );
 
   for (const md of mdFiles) {
-    try {
-      const text = await app.vault.read(md);
-      for (const parsed of parseAllRefs(text)) {
-        const ref = parsed.ref;
-        // Skip already-S3 refs — those files are legitimately gone locally
-        if (isAlreadyS3Ref(ref, s3.publicEndpoint, s3.endpoint, s3.bucket)) continue;
-        if (isExternalRef(ref)) continue;
+    // 1. Из metadataCache — wiki embeds и links (быстро, без чтения файла)
+    const cache = app.metadataCache.getFileCache(md);
 
-        // Collect both full path and bare filename
-        const bare = ref.split("/").pop()?.split("?")[0] ?? ref;
-        referencedNames.add(bare);
-        referencedPaths.add(normalizePath(ref));
+    for (const embed of cache?.embeds ?? []) {
+      const e = refExt(embed.link);
+      if (ATTACHMENT_EXT.has(e)) referenced.add(refFilename(embed.link));
+    }
+
+    for (const link of cache?.links ?? []) {
+      const e = refExt(link.link);
+      if (ATTACHMENT_EXT.has(e)) referenced.add(refFilename(link.link));
+    }
+
+    // 2. Из текста — HTML-теги и markdown-ссылки
+    //    (metadataCache не покрывает <img src=...>, <video>, <audio>)
+    const content = await app.vault.cachedRead(md);
+    const allRefs = parseAllRefs(content);
+
+    for (const { ref, kind } of allRefs) {
+      if (
+        (kind === "html-img" || kind === "html-video" || kind === "html-audio" ||
+         kind === "md-embed" || kind === "md-link") &&
+        !isExternalRef(ref) &&
+        !isAlreadyS3Ref(ref, settings.s3.publicEndpoint, settings.s3.endpoint, settings.s3.bucket)
+      ) {
+        const e = refExt(ref);
+        if (ATTACHMENT_EXT.has(e)) referenced.add(refFilename(ref));
       }
-    } catch { /* skip unreadable */ }
+    }
   }
 
-  // Also protect files that are in syncState.processed —
-  // they were uploaded to S3 and their local copy was already deleted by sync.
-  // If somehow they still exist locally, they ARE orphans — so we don't protect them here.
-  // But files NOT in state and NOT referenced → true orphans.
+  return referenced;
+}
 
-  // ── Find orphan files in attachment folders ────────────────────────────
+// ── cmdCleanup ────────────────────────────────────────────────────────────────
+
+export async function cmdCleanup(
+  app: App,
+  settings: VaultS3Settings,
+  state: SyncState,           // передаётся из main.ts, зарезервирован для будущего
+  dryRun = false,
+  logger?: { info: (m: string) => void; warn: (m: string) => void }
+): Promise<{ orphans: number; moved: number }> {
+  const log = logger ?? {
+    info: (m: string) => console.log(`[Cleanup] ${m}`),
+    warn: (m: string) => console.warn(`[Cleanup] ${m}`),
+  };
+
+  log.info(dryRun ? "CLEANUP local — DRY RUN" : "CLEANUP local — started");
+
+  // 1. Собираем все referenced filenames
+  const referenced = await collectReferencedFilenames(app, settings);
+  log.info(`Referenced attachment filenames: ${referenced.size}`);
+
+  // 2. Обходим attachment folders и ищем orphans
   const orphans: TFile[] = [];
 
-  for (const folderName of attachmentFolders) {
+  for (const folderName of settings.attachmentFolders) {
     const folder = app.vault.getAbstractFileByPath(normalizePath(folderName));
-    if (!(folder instanceof TFolder)) continue;
+    if (!folder) continue;
 
-    for (const child of folder.children) {
-      if (!(child instanceof TFile)) continue;
-      if (isIgnored(child.path, ignoreFolders)) continue;
-      if (ignoreFiles && isIgnoredFile(child.name, ignoreFiles)) continue;
-
-      const ext = "." + child.extension.toLowerCase();
-      if (!ATTACHMENT_EXT.has(ext)) continue;
-
-      // A file is an orphan ONLY if:
-      // 1. Its name is NOT referenced in any note
-      // 2. Its full path is NOT referenced in any note
-      // 3. It is NOT already processed (uploaded) in syncState
-      const isReferenced =
-        referencedNames.has(child.name) ||
-        referencedPaths.has(child.path);
-
-      const isProcessed = !!state.processed[child.path];
-
-      if (!isReferenced && !isProcessed) {
-        orphans.push(child);
+    for (const file of app.vault.getFiles()) {
+      if (!file.path.startsWith(folderName + "/")) continue;
+      if (!ATTACHMENT_EXT.has(refExt(file.name))) continue;
+      if (isIgnoredFile(file.name, settings.ignoreFiles ?? [])) continue;
+      if (!referenced.has(file.name)) {
+        orphans.push(file);
       }
     }
   }
 
-  orphans.sort((a, b) => b.stat.size - a.stat.size);
-  const totalSize = orphans.reduce((s, f) => s + f.stat.size, 0);
+  log.info(`Found ${orphans.length} local orphan(s)`);
 
-  // ── Dry run report ─────────────────────────────────────────────────────
   if (dryRun) {
-    const lines = orphans.map(
-      (f) => `  ${f.path}  (${(f.stat.size / 1024).toFixed(1)} KB)`
-    );
-    const summary = `DRY RUN: ${orphans.length} orphan files, ${(totalSize / 1024 / 1024).toFixed(2)} MB`;
-    new Notice(summary, 10000);
-    console.log("[S3 Cleanup] " + summary);
-    console.log(lines.join("\n"));
-    return { moved: 0, totalSize };
+    for (const f of orphans) {
+      log.info(`  DRY orphan: ${f.path} (${(f.stat.size / 1024).toFixed(1)} KB)`);
+    }
+    return { orphans: orphans.length, moved: 0 };
   }
 
-  if (orphans.length === 0) {
-    new Notice("✅ Cleanup: no orphan files found.", 5000);
-    return { moved: 0, totalSize: 0 };
-  }
-
-  // ── Move orphans to trash folder ───────────────────────────────────────
-  const trashAbstract = app.vault.getAbstractFileByPath(normalizePath(trashFolder));
-  if (!trashAbstract) {
-    await app.vault.createFolder(normalizePath(trashFolder));
-  }
-
+  // 3. Перемещаем orphans в trash папку
+  // settings.trashFolder берётся напрямую из VaultS3Settings (не из settings.options)
+  const trashFolder = settings.trashFolder;
   let moved = 0;
-  for (const file of orphans) {
-    try {
-      // Avoid collisions: if a file with same name exists in trash, add suffix
-      let destName = file.name;
-      let dest = normalizePath(`${trashFolder}/${destName}`);
-      let counter = 1;
-      while (app.vault.getAbstractFileByPath(dest)) {
-        const nameParts = file.name.split(".");
-        const nameNoExt = nameParts.slice(0, -1).join(".");
-        const ext = nameParts.slice(-1)[0];
-        destName = `${nameNoExt}_${counter}.${ext}`;
-        dest = normalizePath(`${trashFolder}/${destName}`);
-        counter++;
-      }
 
-      await app.vault.rename(file, dest);
-      console.log(`[S3 Cleanup] → trash: ${file.path}`);
+  for (const f of orphans) {
+    try {
+      const dest = normalizePath(`${trashFolder}/${f.name}`);
+      await app.vault.rename(f, dest);
+      log.info(`  Orphan → trash: ${f.name}`);
       moved++;
     } catch (err) {
-      console.warn(`[S3 Cleanup] Could not move: ${file.name}`, err);
+      log.warn(`  Could not move ${f.name}: ${err}`);
     }
   }
 
-  const msg = `🗑️ Cleanup: ${moved} orphan files → ${trashFolder} (${(totalSize / 1024 / 1024).toFixed(2)} MB)`;
-  new Notice(msg, 8000);
-  console.log("[S3 Cleanup] " + msg);
-
-  return { moved, totalSize };
+  log.info(`CLEANUP local complete: ${moved} moved to trash`);
+  return { orphans: orphans.length, moved };
 }
