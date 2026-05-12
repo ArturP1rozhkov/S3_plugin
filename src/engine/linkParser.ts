@@ -1,7 +1,7 @@
 /**
  * Regex patterns — exact port from vault_s3.py
  */
-export const RE_WIKI  = /!\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]/g;
+export const RE_WIKI  = /!?\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]/g;
 export const RE_MD    = /!\[[^\]]*\]\(([^)]+)\)/g;
 export const RE_HTML_IMG   = /<img[^>]+src=["']([^"']+)["']/gi;
 export const RE_HTML_VIDEO = /<video[^>]+src=["']([^"']+)["']/gi;

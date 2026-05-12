@@ -1,6 +1,10 @@
 import { Notice, Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, VaultS3Settings, VaultS3SettingTab } from "./settings";
 import { emptyState, SyncState } from "./state";
+import { cmdSync } from "./engine/sync";
+import { cmdCleanup } from "./engine/cleanup";
+import { cmdCleanupS3 } from "./engine/cleanupS3";
+import { cmdStatus } from "./engine/status";
 
 export default class VaultS3Plugin extends Plugin {
   settings!: VaultS3Settings;
@@ -8,24 +12,21 @@ export default class VaultS3Plugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
-    this.syncState = emptyState();
+    const saved = await this.loadData();
+    this.syncState = saved?.syncState ?? emptyState();
 
-    // ── Settings tab ───────────────────────────────────────────────────────
     this.addSettingTab(new VaultS3SettingTab(this.app, this));
 
-    // ── Ribbon icon ────────────────────────────────────────────────────────
     this.addRibbonIcon("cloud-upload", "Vault S3 Sync", () => {
-      new Notice("Vault S3 Sync: use Commands (Ctrl+P) to run sync, cleanup or status.");
+      new Notice("Vault S3 Sync: use Ctrl+P → 'S3' to run commands.");
     });
 
-    // ── Commands ───────────────────────────────────────────────────────────
     this.addCommand({
       id: "s3-sync",
       name: "Sync: upload attachments to S3",
       callback: async () => {
-        new Notice("S3 Sync started…");
-        const { cmdSync } = await import("./engine/sync");
         await cmdSync(this.app, this.settings, this.syncState);
+        await this.saveData({ ...this.settings, syncState: this.syncState });
       },
     });
 
@@ -33,9 +34,15 @@ export default class VaultS3Plugin extends Plugin {
       id: "s3-cleanup",
       name: "Cleanup: move local orphan files to trash",
       callback: async () => {
-        new Notice("S3 Cleanup (local) started…");
-        const { cmdCleanup } = await import("./engine/cleanup");
-        await cmdCleanup(this.app, this.settings);
+        await cmdCleanup(this.app, this.settings, this.syncState);
+      },
+    });
+
+    this.addCommand({
+      id: "s3-cleanup-dry-run",
+      name: "Cleanup (dry run): preview orphan files without moving",
+      callback: async () => {
+        await cmdCleanup(this.app, this.settings, this.syncState, true);
       },
     });
 
@@ -43,9 +50,15 @@ export default class VaultS3Plugin extends Plugin {
       id: "s3-cleanup-s3",
       name: "Cleanup S3: move orphan objects to quarantine",
       callback: async () => {
-        new Notice("S3 Cleanup (remote) started…");
-        const { cmdCleanupS3 } = await import("./engine/cleanupS3");
         await cmdCleanupS3(this.app, this.settings);
+      },
+    });
+
+    this.addCommand({
+      id: "s3-cleanup-s3-dry-run",
+      name: "Cleanup S3 (dry run): preview orphan objects without moving",
+      callback: async () => {
+        await cmdCleanupS3(this.app, this.settings, true);
       },
     });
 
@@ -53,12 +66,11 @@ export default class VaultS3Plugin extends Plugin {
       id: "s3-status",
       name: "Status: show vault & bucket statistics",
       callback: async () => {
-        const { cmdStatus } = await import("./engine/status");
         await cmdStatus(this.app, this.settings);
       },
     });
 
-    console.log("Vault S3 Sync plugin loaded");
+    console.log("Vault S3 Sync plugin loaded ✓");
   }
 
   onunload() {
@@ -66,10 +78,11 @@ export default class VaultS3Plugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = await this.loadData();
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.saveData({ ...this.settings, syncState: this.syncState });
   }
 }
