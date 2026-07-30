@@ -13,3 +13,22 @@ Thumbs.db
 
 # Logs
 *.log
+# Runtime data of the installed Obsidian plugin
+data.json
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+credentials.json
+*.secret.json
+config.local.json
+
+# Test output
+coverage/
+test-results/
+
+# Local vaults and temporary files
+test-vault/
+*.tmp
+# Temporary local experiments; migrate cases to Vitest later
+parser-smoke.mjs

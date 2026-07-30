@@ -261,12 +261,6 @@ async function processMdFile(
     content = content.replace(fullMatch, newText);
     changes++;
 
-    // PDF dummy
-    if (uploadedExt === ".pdf") {
-      await ensurePdfDummy(app, settings, uploadedName, url);
-      logger.info(`PDF dummy created: ${uploadedName}`);
-    }
-
     // Удаляем локальный файл после успешной загрузки
     if (localFile) {
       try {
@@ -274,6 +268,16 @@ async function processMdFile(
         logger.info(`Uploaded & removed: ${localFile.name} → ${url}`);
       } catch (err) {
         logger.warn(`Could not delete local file: ${localFile.name}`);
+      }
+    }
+
+    // PDF dummy — создаём ПОСЛЕ удаления оригинала.
+    if (uploadedExt === ".pdf") {
+      try {
+        await ensurePdfDummy(app, settings, uploadedName, url);
+        logger.info(`PDF dummy created: ${uploadedName}`);
+      } catch (err) {
+        logger.error(`Failed to create PDF dummy '${uploadedName}': ${err}`);
       }
     }
   }
