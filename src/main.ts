@@ -31,6 +31,29 @@ export default class VaultS3Plugin extends Plugin {
     });
 
     this.addCommand({
+      id: "s3-sync-active-note",
+      name: "Sync current active note",
+      callback: async () => {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile || activeFile.extension.toLowerCase() !== "md") {
+          new Notice("Vault S3 Sync: open a Markdown note first.");
+          return;
+        }
+        if (activeFile.path.split("/").some((p) => this.settings.ignoreFolders.includes(p))) {
+          new Notice("Vault S3 Sync: active note is in an ignored folder.");
+          return;
+        }
+        try {
+          await cmdSync(this.app, this.settings, this.syncState, undefined, [activeFile]);
+          await this.saveData({ ...this.settings, syncState: this.syncState });
+        } catch (err) {
+          console.error("[S3 Sync] Sync current active note failed:", err);
+          new Notice("Vault S3 Sync: failed to sync active note. See console.", 6000);
+        }
+      },
+    });
+
+    this.addCommand({
       id: "s3-cleanup",
       name: "Cleanup: move local orphan files to trash",
       callback: async () => {

@@ -296,7 +296,8 @@ export async function cmdSync(
   app: App,
   settings: VaultS3Settings,
   state: SyncState,
-  logger?: SyncLogger
+  logger?: SyncLogger,
+  targetFiles?: TFile[]
 ): Promise<{ totalFiles: number; totalReplacements: number }> {
   const log    = logger ?? consoleLogger();
   const client = createS3Client(settings.s3);
@@ -306,7 +307,8 @@ export async function cmdSync(
     return { totalFiles: 0, totalReplacements: 0 };
   }
 
-  const mdFiles = app.vault.getMarkdownFiles().filter(
+  const sourceFiles = targetFiles ?? app.vault.getMarkdownFiles();
+  const mdFiles = sourceFiles.filter(
     (f) => !isIgnored(f.path, settings.ignoreFolders)
   );
 

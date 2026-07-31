@@ -1,6 +1,6 @@
 // src/engine/cleanup.ts
 
-import { App, TFile, normalizePath } from "obsidian";
+import { App, Notice, TFile, normalizePath } from "obsidian";
 import type { VaultS3Settings } from "../settings";
 import type { SyncState } from "../state";
 import {
@@ -126,6 +126,15 @@ export async function cmdCleanup(
     for (const f of orphans) {
       log.info(`  DRY orphan: ${f.path} (${(f.stat.size / 1024).toFixed(1)} KB)`);
     }
+
+    const preview = orphans.slice(0, 10).map((f) => f.path);
+    const remaining = orphans.length - preview.length;
+    const extra = remaining > 0 ? ` (+${remaining} more)` : "";
+    new Notice(
+      `Cleanup dry-run: ${orphans.length} orphan file(s)\n${preview.join("\n")}${extra}`,
+      12000
+    );
+
     return { orphans: orphans.length, moved: 0 };
   }
 
