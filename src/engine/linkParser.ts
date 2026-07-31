@@ -25,8 +25,8 @@ const RE_WIKI = /(?<!\^)(!?\[\[)(.*?)\]\]/g;
 const RE_MD = /(!?\[([^\]]*)\])\(([^)]*)\)/g;
 
 const RE_HTML_IMG   = /<img[^>]*\bsrc="([^"]+)"[^>]*>/gi;
-const RE_HTML_VIDEO = /<video[^>]*\bsrc="([^"]+)"[^>]*>/gi;
-const RE_HTML_AUDIO = /<audio[^>]*\bsrc="([^"]+)"[^>]*>/gi;
+const RE_HTML_VIDEO = /<video\b[^>]*\bsrc="([^"]+)"[^>]*>(?:<\/video>)?/gi;
+const RE_HTML_AUDIO = /<audio\b[^>]*\bsrc="([^"]+)"[^>]*>(?:<\/audio>)?/gi;
 
 // Obsidian bare link: [path/to/file.ext] — кликабелен в Obsidian, но без href
 //
@@ -56,6 +56,7 @@ const RE_BARE = new RegExp(
  *   "https://s3.../a.jpg"  → { path: "https://...",    query: "",      anchor: "" }
  */
 export function splitRef(raw: string): { path: string; query: string; anchor: string } {
+  raw = raw.trim();
   if (raw.startsWith("http://") || raw.startsWith("https://")) {
     return { path: raw, query: "", anchor: "" };
   }
