@@ -21,7 +21,11 @@ export function createS3Client(cfg: S3Config): S3Client {
 }
 
 export function publicUrl(cfg: S3Config, key: string): string {
-  return `${cfg.publicEndpoint.replace(/\/$/, "")}/${key}`;
+  const base = cfg.publicEndpoint.replace(/\/+$/, "");
+  if (cfg.publicUrlStyle === "virtual-host") {
+    return `${base}/${key}`;
+  }
+  return `${base}/${cfg.bucket}/${key}`;
 }
 
 export async function uploadBuffer(

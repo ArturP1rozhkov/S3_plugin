@@ -3,6 +3,7 @@
 import { App, Notice, TFile, TFolder } from "obsidian";
 import type { VaultS3Settings } from "../settings";
 import { createS3Client, listAllObjects, moveObject, deleteObject } from "../s3Client";
+import { extractPdfUrl } from "./pdfDummy";
 
 function isIgnored(path: string, ignoreFolders: string[]): boolean {
   return path.split("/").some((p) => ignoreFolders.includes(p));
@@ -15,23 +16,29 @@ function isIgnored(path: string, ignoreFolders: string[]): boolean {
  *   1. Все .md файлы — ищем https-URL с префиксом нашего S3
  *   2. Dummy PDF файлы — их содержимое и есть S3 URL
  *
- * Поддерживает два варианта настройки:
- *   a) publicEndpoint задан  → prefix = publicEndpoint
- *   b) publicEndpoint пуст   → prefix = endpoint/bucket  (fallback)
+ * Prefix вычисляется строго из publicUrlStyle:
+ *   - path:         publicEndpoint/bucket
+ *   - virtual-host: publicEndpoint
+ * При virtual-host старые URL вида publicEndpoint/key продолжают совпадать,
+ * поскольку prefix не включает bucket.
  */
 async function collectS3Keys(app: App, settings: VaultS3Settings): Promise<Set<string>> {
   const { ignoreFolders, s3, pdfDummyFolder } = settings;
 
-  // Строим prefix для матчинга URL → ключ
-  const publicEndpoint = s3.publicEndpoint?.replace(/\/$/, "");
-  const endpointBucket = s3.endpoint && s3.bucket
-    ? `${s3.endpoint.replace(/\/$/, "")}/${s3.bucket}`
-    : "";
+  // Строим prefix для матчинга URL → ключ в зависимости от publicUrlStyle
+  const normalizedPublicEndpoint = s3.publicEndpoint?.replace(/\/+$/, "") ?? "";
 
-  const prefix = publicEndpoint || endpointBucket;
+  let prefix = "";
+  if (normalizedPublicEndpoint && s3.bucket) {
+    if (s3.publicUrlStyle === "virtual-host") {
+      prefix = normalizedPublicEndpoint;
+    } else {
+      prefix = `${normalizedPublicEndpoint}/${s3.bucket}`;
+    }
+  }
 
   if (!prefix) {
-    console.warn("[S3 CleanupS3] Neither publicEndpoint nor endpoint+bucket configured — cannot collect S3 keys");
+    console.warn("[S3 CleanupS3] publicEndpoint and bucket must be configured — cannot collect S3 keys");
     return new Set();
   }
 
@@ -63,9 +70,10 @@ async function collectS3Keys(app: App, settings: VaultS3Settings): Promise<Set<s
     for (const child of dummyFolder.children) {
       if (child instanceof TFile && child.extension.toLowerCase() === "pdf") {
         try {
-          const content = (await app.vault.read(child)).trim();
-          if (content.startsWith(prefix)) {
-            const key = content.slice(prefix.length).replace(/^\//, "");
+          const content = await app.vault.read(child);
+          const url = extractPdfUrl(content);
+          if (url && url.startsWith(prefix)) {
+            const key = url.slice(prefix.length).replace(/^\//, "");
             if (key) s3Keys.add(key);
           }
         } catch { /* пропустить */ }
@@ -90,10 +98,10 @@ export async function cmdCleanupS3(
     return { moved: 0 };
   }
 
-  // Guard: без endpoint нельзя определить какие ключи "наши"
-  const hasPrefix = !!(s3.publicEndpoint || (s3.endpoint && s3.bucket));
+  // Guard: без publicEndpoint и bucket нельзя определить какие ключи "наши"
+  const hasPrefix = !!(s3.publicEndpoint && s3.bucket);
   if (!hasPrefix) {
-    new Notice("⚠️ S3 Cleanup: configure publicEndpoint or endpoint+bucket first.", 6000);
+    new Notice("⚠️ S3 Cleanup: configure publicEndpoint and bucket first.", 6000);
     console.warn("[S3 CleanupS3] Cannot run: no URL prefix configured");
     return { moved: 0 };
   }

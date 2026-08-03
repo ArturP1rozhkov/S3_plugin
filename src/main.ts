@@ -6,6 +6,17 @@ import { cmdCleanup } from "./engine/cleanup";
 import { cmdCleanupS3 } from "./engine/cleanupS3";
 import { cmdStatus } from "./engine/status";
 
+export function migrateSettings(data: unknown): VaultS3Settings {
+  const incoming = (data ?? {}) as Partial<VaultS3Settings>;
+  const settings = Object.assign({}, DEFAULT_SETTINGS, incoming);
+  settings.s3 = Object.assign({}, DEFAULT_SETTINGS.s3, settings.s3);
+  if (incoming.s3 && !incoming.s3.publicUrlStyle) {
+    // Older versions behaved like virtual-host style (bucket was omitted from public URL).
+    settings.s3.publicUrlStyle = "virtual-host";
+  }
+  return settings;
+}
+
 export default class VaultS3Plugin extends Plugin {
   settings!: VaultS3Settings;
   syncState!: SyncState;
@@ -102,7 +113,7 @@ export default class VaultS3Plugin extends Plugin {
 
   async loadSettings() {
     const data = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    this.settings = migrateSettings(data);
   }
 
   async saveSettings() {

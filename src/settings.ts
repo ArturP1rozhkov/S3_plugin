@@ -14,6 +14,7 @@ export interface S3Config {
   imageWidth: number;
   imageMaxPx: number;
   hashFilenames: boolean;
+  publicUrlStyle: "path" | "virtual-host";
 }
 
 export interface VaultS3Settings {
@@ -51,6 +52,7 @@ export const DEFAULT_SETTINGS: VaultS3Settings = {
     imageWidth: 550,
     imageMaxPx: 1920,
     hashFilenames: true,
+    publicUrlStyle: "path",
   },
   attachmentFolders: ["Картинки", "Attachments", "Файлы"],
   ignoreFolders: [".git", ".obsidian", ".trash", ".trash_attachments", ".vault_tools"],
@@ -88,6 +90,19 @@ export class VaultS3SettingTab extends PluginSettingTab {
       .addText(t => t.setPlaceholder("https://yourbucket.s3.cloud.ru")
         .setValue(this.plugin.settings.s3.publicEndpoint)
         .onChange(async v => { this.plugin.settings.s3.publicEndpoint = v.trim(); await this.plugin.saveSettings(); }));
+
+    new Setting(containerEl).setName("Public URL style").setDesc(
+      "Path style: publicEndpoint/bucket/key (recommended for MinIO and self-hosted S3). " +
+      "Virtual-host style: publicEndpoint/key; the publicEndpoint must already include the bucket name, e.g. https://bucket.s3.provider.tld."
+    )
+      .addDropdown(dropdown => dropdown
+        .addOption("path", "Path style: publicEndpoint/bucket/key")
+        .addOption("virtual-host", "Virtual-host style: publicEndpoint/key")
+        .setValue(this.plugin.settings.s3.publicUrlStyle)
+        .onChange(async v => {
+          this.plugin.settings.s3.publicUrlStyle = v as "path" | "virtual-host";
+          await this.plugin.saveSettings();
+        }));
 
     new Setting(containerEl).setName("Bucket").setDesc("S3 bucket name")
       .addText(t => t.setPlaceholder("mybucket")
