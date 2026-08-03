@@ -1,4 +1,5 @@
 import { Notice, Plugin } from "obsidian";
+import { ResultModal } from "./engine/status";
 import { DEFAULT_SETTINGS, VaultS3Settings, VaultS3SettingTab } from "./settings";
 import { emptyState, SyncState } from "./state";
 import { cmdSync } from "./engine/sync";
@@ -59,7 +60,12 @@ export default class VaultS3Plugin extends Plugin {
           await this.saveData({ ...this.settings, syncState: this.syncState });
         } catch (err) {
           console.error("[S3 Sync] Sync current active note failed:", err);
-          new Notice("Vault S3 Sync: failed to sync active note. See console.", 6000);
+          new ResultModal(this.app, {
+            title: "S3 Sync — Active Note",
+            icon: "❌",
+            subtitle: activeFile.name,
+            sections: [{ title: "", rows: { "⚠️ Error": String(err) }, error: true }],
+          }).open();
         }
       },
     });

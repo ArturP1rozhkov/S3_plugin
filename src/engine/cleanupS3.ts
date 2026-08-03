@@ -1,9 +1,10 @@
 // src/engine/cleanupS3.ts
 
-import { App, Notice, TFile, TFolder } from "obsidian";
+import { App, Modal, Notice, TFile, TFolder } from "obsidian";
 import type { VaultS3Settings } from "../settings";
 import { createS3Client, listAllObjects, moveObject, deleteObject } from "../s3Client";
 import { extractPdfUrl } from "./pdfDummy";
+import { ResultModal, type ResultData, type ResultList } from "./status";
 
 function isIgnored(path: string, ignoreFolders: string[]): boolean {
   return path.split("/").some((p) => ignoreFolders.includes(p));
@@ -94,14 +95,14 @@ export async function cmdCleanupS3(
   const retentionDays     = s3.quarantineRetentionDays ?? 14;
 
   if (!s3.bucket || !s3.accessKey || !s3.secretKey) {
-    new Notice("⚠️ S3 credentials not configured.", 5000);
+    showCleanupS3Result(app, true, { error: "S3 credentials not configured" });
     return { moved: 0 };
   }
 
   // Guard: без publicEndpoint и bucket нельзя определить какие ключи "наши"
   const hasPrefix = !!(s3.publicEndpoint && s3.bucket);
   if (!hasPrefix) {
-    new Notice("⚠️ S3 Cleanup: configure publicEndpoint and bucket first.", 6000);
+    showCleanupS3Result(app, true, { error: "Configure publicEndpoint and bucket first" });
     console.warn("[S3 CleanupS3] Cannot run: no URL prefix configured");
     return { moved: 0 };
   }
@@ -118,7 +119,7 @@ export async function cmdCleanupS3(
   try {
     allObjects = await listAllObjects(client, s3.bucket);
   } catch (err) {
-    new Notice("❌ Cannot list S3 objects. Check credentials.", 6000);
+    showCleanupS3Result(app, true, { error: "Cannot list S3 objects. Check credentials." });
     console.error("[S3 CleanupS3] List failed", err);
     return { moved: 0 };
   }
@@ -135,9 +136,17 @@ export async function cmdCleanupS3(
   );
 
   if (dryRun) {
-    const lines = orphans.map((o) => `  ${o.key} (${(o.size / 1024).toFixed(1)} KB)`);
-    new Notice(`DRY RUN S3: ${orphans.length} orphan objects, ${(totalSize / 1024 / 1024).toFixed(2)} MB`, 8000);
-    console.log("[S3 CleanupS3] DRY RUN:\n" + lines.join("\n"));
+    showCleanupS3Result(app, true, { orphans, totalSize });
+    return { moved: 0 };
+  }
+
+  // ── Confirm before real move ──────────────────────────────────────────────
+  const confirmed = await askConfirmation(
+    app,
+    `Move ${orphans.length} orphan S3 object(s) to quarantine prefix "${s3.quarantineFolder}/"?`
+  );
+  if (!confirmed) {
+    console.log("[S3 CleanupS3] Cancelled by user");
     return { moved: 0 };
   }
 
@@ -167,9 +176,105 @@ export async function cmdCleanupS3(
     }
   }
 
-  const msg = `🪣 S3 Cleanup: ${moved} objects → quarantine, ${deleted} expired deleted`;
-  new Notice(msg, 8000);
-  console.log("[S3 CleanupS3] " + msg);
+  console.log(`[S3 CleanupS3] 🪣 S3 Cleanup: ${moved} objects → quarantine, ${deleted} expired deleted`);
 
+  showCleanupS3Result(app, false, { orphans, moved, deleted, totalSize });
   return { moved };
+}
+
+interface CleanupS3ResultInput {
+  orphans?: Array<{ key: string; size: number }>;
+  moved?: number;
+  deleted?: number;
+  totalSize?: number;
+  error?: string;
+}
+
+function askConfirmation(app: App, message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const modal = new Modal(app);
+    modal.titleEl.setText("Confirm action");
+    modal.contentEl.createEl("p", { text: message });
+    const btnContainer = modal.contentEl.createDiv({ cls: "s3sync-confirm-buttons" });
+    const ok = btnContainer.createEl("button", { text: "Move to quarantine", cls: "mod-cta" });
+    const cancel = btnContainer.createEl("button", { text: "Cancel" });
+    ok.addEventListener("click", () => { modal.close(); resolve(true); });
+    cancel.addEventListener("click", () => { modal.close(); resolve(false); });
+    modal.open();
+  });
+}
+
+function groupByPrefix(keys: string[]): Record<string, string[]> {
+  const groups: Record<string, string[]> = {};
+  for (const key of keys) {
+    const prefix = key.includes("/") ? key.split("/")[0] : "root";
+    (groups[prefix] ??= []).push(key);
+  }
+  return groups;
+}
+
+function showCleanupS3Result(
+  app: App,
+  dryRun: boolean,
+  input: CleanupS3ResultInput
+): void {
+  const { orphans = [], moved = 0, deleted = 0, totalSize = 0, error } = input;
+
+  if (error) {
+    const data: ResultData = {
+      title: "Cleanup S3",
+      icon: "❌",
+      subtitle: "Failed",
+      sections: [{ title: "", rows: { "⚠️ Error": error }, error: true }],
+    };
+    new ResultModal(app, data).open();
+    return;
+  }
+
+  const sections: ResultData["sections"] = [
+    {
+      title: "",
+      rows: {
+        "☁️ Orphan objects found": String(orphans.length),
+        "📦 Total size": `${(totalSize / 1024 / 1024).toFixed(2)} MB`,
+      },
+    },
+  ];
+
+  if (!dryRun) {
+    sections[0].rows["🗑️ Moved to quarantine"] = String(moved);
+    sections[0].rows["🧹 Expired quarantine deleted"] = String(deleted);
+  }
+
+  const grouped = groupByPrefix(orphans.map((o) => o.key));
+  const lists: ResultList[] = [];
+  for (const [prefix, keys] of Object.entries(grouped).sort()) {
+  const prefixSize = orphans
+    .filter((o) => (o.key.includes("/") ? o.key.split("/")[0] : "root") === prefix)
+    .reduce((s, o) => s + o.size, 0);
+  if (prefixSize) { /* Silence unused-variable in dev builds; shown if UI adds per-prefix size */ }
+    lists.push({
+      title: `${prefix}/`,
+      icon: "☁️",
+      items: keys.slice(0, 15).map((k) => {
+        const obj = orphans.find((o) => o.key === k);
+        const kb = obj ? obj.size / 1024 : 0;
+        return { label: k, value: `(${kb.toFixed(1)} KB)` };
+      }),
+      initiallyExpanded: keys.length <= 15,
+      maxInitialItems: 15,
+    });
+  }
+
+  const data: ResultData = {
+    title: dryRun ? "Cleanup S3 - Dry Run" : "Cleanup S3 - Completed",
+    icon: dryRun ? "🔍" : "☁️🗑️",
+    subtitle: dryRun
+      ? `${orphans.length} orphan object(s) found`
+      : `${moved} object(s) moved to quarantine`,
+    sections,
+    lists: lists.length > 0 ? lists : undefined,
+  };
+
+  new ResultModal(app, data).open();
 }

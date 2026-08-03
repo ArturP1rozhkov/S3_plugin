@@ -11,6 +11,7 @@ import {
   refExt,
   refFilename,
 } from "./linkParser";
+import { ResultModal, type ResultData } from "./status";
 import {
   ATTACHMENT_EXT,
   fileType,
@@ -305,14 +306,55 @@ export async function cmdSync(
   new Notice(`S3 Sync: scanning ${mdFiles.length} notes…`);
 
   let totalReplacements = 0;
+  const errors: string[] = [];
+  const failedLog = {
+    ...log,
+    error: (m: string) => {
+      log.error(m);
+      errors.push(m);
+    },
+  };
 
   for (let i = 0; i < mdFiles.length; i++) {
-    totalReplacements += await processMdFile(app, settings, client, state, mdFiles[i], log);
+    totalReplacements += await processMdFile(app, settings, client, state, mdFiles[i], failedLog);
     if ((i + 1) % 50 === 0) new Notice(`S3 Sync: ${i + 1}/${mdFiles.length} notes processed…`);
   }
 
-  const msg = `✅ S3 Sync complete: ${totalReplacements} replacements in ${mdFiles.length} notes`;
-  new Notice(msg, 8000);
+  const success = errors.length === 0 && totalReplacements >= 0;
+  const icon = success ? "✅" : totalReplacements > 0 ? "⚠️" : "❌";
+  const subtitle = targetFiles && targetFiles.length === 1
+    ? `Note: ${targetFiles[0].name}`
+    : `${mdFiles.length} notes scanned`;
+
+  const data: ResultData = {
+    title: "S3 Sync",
+    icon,
+    subtitle,
+    sections: [
+      {
+        title: "",
+        rows: {
+          "📝 Notes processed": String(mdFiles.length),
+          "🔗 Embeds replaced": String(totalReplacements),
+          "⚠️ Errors": errors.length > 0 ? String(errors.length) : "none",
+        },
+        error: errors.length > 0,
+      },
+    ],
+  };
+
+  if (errors.length > 0) {
+    data.lists = [{
+      title: "Errors",
+      icon: "❌",
+      items: errors.slice(0, 50).map((e) => ({ label: e })),
+      initiallyExpanded: true,
+    }];
+  }
+
+  new ResultModal(app, data).open();
+
+  const msg = `${icon} S3 Sync complete: ${totalReplacements} replacements in ${mdFiles.length} notes`;
   log.info(msg);
 
   return { totalFiles: mdFiles.length, totalReplacements };

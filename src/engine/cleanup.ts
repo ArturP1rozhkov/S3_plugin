@@ -1,6 +1,6 @@
 // src/engine/cleanup.ts
 
-import { App, Notice, TFile, normalizePath } from "obsidian";
+import { App, Modal, Notice, TFile, normalizePath } from "obsidian";
 import type { VaultS3Settings } from "../settings";
 import type { SyncState } from "../state";
 import {
@@ -11,6 +11,21 @@ import {
   refFilename,
 } from "./linkParser";
 import { ATTACHMENT_EXT } from "./fileClassifier";
+import { ResultModal, type ResultData } from "./status";
+
+function askConfirmation(app: App, message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const modal = new Modal(app);
+    modal.titleEl.setText("Confirm action");
+    modal.contentEl.createEl("p", { text: message });
+    const btnContainer = modal.contentEl.createDiv({ cls: "s3sync-confirm-buttons" });
+    const ok = btnContainer.createEl("button", { text: "Move to trash", cls: "mod-cta" });
+    const cancel = btnContainer.createEl("button", { text: "Cancel" });
+    ok.addEventListener("click", () => { modal.close(); resolve(true); });
+    cancel.addEventListener("click", () => { modal.close(); resolve(false); });
+    modal.open();
+  });
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +40,15 @@ function isIgnoredFile(name: string, ignoreFiles: string[]): boolean {
     if (name === pattern)                                                    return true;
   }
   return false;
+}
+
+function iconForFile(name: string): string {
+  const ext = refExt(name);
+  if ([".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".tiff", ".ico"].includes(ext)) return "🖼️";
+  if (ext === ".pdf") return "📄";
+  if ([".mp3", ".m4a", ".ogg", ".wav", ".flac", ".3gp"].includes(ext)) return "🎵";
+  if ([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".ogv"].includes(ext)) return "🎬";
+  return "📎";
 }
 
 // ── Сбор referenced-файлов из vault ──────────────────────────────────────────
@@ -127,23 +151,52 @@ export async function cmdCleanup(
 
   log.info(`Found ${orphans.length} local orphan(s)`);
 
+  const orphanItems = orphans.map((f) => ({
+    label: f.path,
+    value: `(${(f.stat.size / 1024).toFixed(1)} KB)`,
+    icon: iconForFile(f.name),
+  }));
+
   if (dryRun) {
-    for (const f of orphans) {
-      log.info(`  DRY orphan: ${f.path} (${(f.stat.size / 1024).toFixed(1)} KB)`);
-    }
+    const data: ResultData = {
+      title: "Cleanup — Dry Run",
+      icon: "🔍",
+      subtitle: `${orphans.length} orphan file(s) found`,
+      sections: [
+        {
+          title: "",
+          rows: {
+            "🗑️ Orphan files found": String(orphans.length),
+            "📦 Total size": `${(orphans.reduce((s, f) => s + f.stat.size, 0) / 1024 / 1024).toFixed(2)} MB`,
+          },
+        },
+      ],
+      lists: orphanItems.length > 0
+        ? [{
+            title: "Orphan files",
+            icon: "🔍",
+            items: orphanItems,
+            initiallyExpanded: orphanItems.length <= 15,
+            maxInitialItems: 15,
+          }]
+        : undefined,
+    };
 
-    const preview = orphans.slice(0, 10).map((f) => f.path);
-    const remaining = orphans.length - preview.length;
-    const extra = remaining > 0 ? ` (+${remaining} more)` : "";
-    new Notice(
-      `Cleanup dry-run: ${orphans.length} orphan file(s)\n${preview.join("\n")}${extra}`,
-      12000
-    );
-
+    new ResultModal(app, data).open();
     return { orphans: orphans.length, moved: 0 };
   }
 
-  // 3. Перемещаем orphans в trash папку
+  // 3. Подтверждение перед реальным перемещением
+  const confirmed = await askConfirmation(
+    app,
+    `Move ${orphans.length} orphan file(s) to trash folder "${settings.trashFolder}"?`
+  );
+  if (!confirmed) {
+    log.info("CLEANUP local cancelled by user");
+    return { orphans: orphans.length, moved: 0 };
+  }
+
+  // 4. Перемещаем orphans в trash папку
   // settings.trashFolder берётся напрямую из VaultS3Settings (не из settings.options)
   const trashFolder = settings.trashFolder;
   let moved = 0;
@@ -160,5 +213,32 @@ export async function cmdCleanup(
   }
 
   log.info(`CLEANUP local complete: ${moved} moved to trash`);
+
+  const data: ResultData = {
+    title: "Cleanup — Completed",
+    icon: "🗑️",
+    subtitle: `${moved} of ${orphans.length} orphan file(s) moved to trash`,
+    sections: [
+      {
+        title: "",
+        rows: {
+          "🗑️ Orphan files found": String(orphans.length),
+          "📦 Total size": `${(orphans.reduce((s, f) => s + f.stat.size, 0) / 1024 / 1024).toFixed(2)} MB`,
+          "✅ Moved to trash": String(moved),
+        },
+      },
+    ],
+    lists: orphanItems.length > 0
+      ? [{
+          title: "Moved files",
+          icon: "🗑️",
+          items: orphanItems,
+          initiallyExpanded: orphanItems.length <= 15,
+          maxInitialItems: 15,
+        }]
+      : undefined,
+  };
+
+  new ResultModal(app, data).open();
   return { orphans: orphans.length, moved };
 }
