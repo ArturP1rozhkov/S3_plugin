@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   isAlreadyS3Ref,
+  isAttachmentCandidate,
   isExternalRef,
   makeReplacement,
+  parseAllAttachmentRefs,
   parseAllRefs,
   refExt,
   refFilename,
   splitRef,
 } from "../../src/engine/linkParser";
+import { ATTACHMENT_EXT } from "../../src/engine/fileClassifier";
 
 describe("splitRef", () => {
   it.each([
@@ -63,7 +66,6 @@ describe("parseAllRefs", () => {
     ["[[Folder/img.jpg|alias]]", "wiki-link", "Folder/img.jpg", "alias"],
     ["![alt](img.jpg?ver=2)", "md-embed", "img.jpg?ver=2", "alt"],
     ["[document](file.pdf#page=2)", "md-link", "file.pdf#page=2", "document"],
-    ["[folder/file name.jpg]", "bare-link", "folder/file name.jpg", ""],
     ['<img src="img.jpg">', "html-img", "img.jpg", ""],
     ['<video src="video.mp4"></video>', "html-video", "video.mp4", ""],
     ['<audio src="audio.mp3"></audio>', "html-audio", "audio.mp3", ""],
@@ -139,6 +141,106 @@ describe("S3 classification helpers", () => {
         "my-bucket"
       )
     ).toBe(false);
+  });
+});
+
+describe("isAttachmentCandidate", () => {
+  const ext = ATTACHMENT_EXT;
+
+  it.each([
+    ["wiki-embed image", "![[Files/photo.png]]", true],
+    ["wiki-embed image with size", "![[Files/photo.png|550]]", true],
+    ["wiki-embed image with dimensions", "![[Files/photo.png|550x300]]", true],
+    ["wiki-embed pdf", "![[Files/file.pdf]]", true],
+    ["wiki-embed audio", "![[Files/audio.mp3]]", true],
+    ["wiki-embed video", "![[Files/video.mp4]]", true],
+    ["markdown-embed image", "![alt](https://host/image.png)", true],
+    ["markdown-embed image with title", '![Схема](https://host/image.png "title")', true],
+    ["markdown-embed local image", "![alt](Files/photo.jpg)", true],
+    ["html image", '<img src="https://host/image.jpg" width="550">', true],
+    ["html audio", '<audio src="https://host/audio.mp3" controls></audio>', true],
+    ["html video", '<video src="https://host/video.mp4" controls></video>', true],
+    ["html source", '<source src="https://host/video.webm" type="video/webm">', true],
+  ])("accepts %s", (_name, input, expected) => {
+    const parsed = parseAllRefs(input)[0];
+    expect(isAttachmentCandidate(parsed, ext)).toBe(expected);
+  });
+
+  it.each([
+    ["wiki-link pdf", "[[Files/file.pdf]]", false],
+    ["wiki-link pdf with alias", "[[Files/file.pdf|Открыть]]", false],
+    ["wiki-link image", "[[Files/photo.png|Открыть]]", false],
+    ["wiki-link note", "[[Обычная заметка]]", false],
+    ["markdown-link image", "[Обычная ссылка](https://host/image.jpg)", false],
+    ["markdown-link pdf", "[Открыть PDF](Files/file.pdf)", false],
+    ["markdown-link external pdf", "[Открыть PDF](https://host/file.pdf)", false],
+    ["bare url does not parse as ref", "https://host/image.jpg", false],
+    ["autolink does not parse as ref", "<https://host/image.jpg>", false],
+    ["anchor", "[Сноска](#fn-1)", false],
+    ["note transclusion", "![[Note]]", false],
+    ["note md transclusion", "![[Note.md]]", false],
+    ["heading transclusion", "![[Note#Heading]]", false],
+    ["block transclusion", "![[Note#^block-id]]", false],
+    ["markdown image fragment-only", "![alt](#anchor)", false],
+    ["markdown link fragment-only", "[text](#fnref-1)", false],
+  ])("rejects %s", (_name, input, expected) => {
+    const parsed = parseAllRefs(input)[0];
+    if (!parsed) {
+      expect(expected).toBe(false);
+      return;
+    }
+    expect(isAttachmentCandidate(parsed, ext)).toBe(expected);
+  });
+});
+
+describe("parseAllAttachmentRefs", () => {
+  it("returns only embed candidates from mixed content", () => {
+    const content = [
+      "![[Files/file.pdf]]",
+      "[[Files/file.pdf]]",
+      "![alt](https://host/image.png)",
+      "[Обычная ссылка](https://host/image.png)",
+      '<img src="https://host/image.jpg">',
+      '<a href="https://host/file.pdf">Открыть</a>',
+      "https://host/video.mp4",
+      "[Сноска](#fn-1)",
+      "![[Note#^block-id]]",
+    ].join("\n");
+
+    const refs = parseAllAttachmentRefs(content, ATTACHMENT_EXT);
+    const kinds = refs.map((r) => r.kind);
+    expect(kinds).toEqual(["wiki-embed", "md-embed", "html-img"]);
+  });
+
+  it("replaces only the embed when link and embed share the same URL", () => {
+    const url = "https://host/image.png";
+    const content = `[Обычная ссылка](${url}) и ![картинка](${url})`;
+    const refs = parseAllAttachmentRefs(content, ATTACHMENT_EXT);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].kind).toBe("md-embed");
+    expect(refs[0].fullMatch).toBe(`![картинка](${url})`);
+  });
+
+  it("preserves Obsidian size aliases on image embeds", () => {
+    const refs = parseAllAttachmentRefs(
+      "![[Files/photo.png|550]]\n![[Files/photo.png|550x300]]",
+      ATTACHMENT_EXT
+    );
+    expect(refs.map((r) => r.ref)).toEqual([
+      "Files/photo.png",
+      "Files/photo.png",
+    ]);
+    expect(refs.map((r) => r.altText)).toEqual(["550", "550x300"]);
+  });
+
+  it("preserves markdown image alt text and title", () => {
+    const refs = parseAllAttachmentRefs(
+      '![Схема](https://host/image.png "title")',
+      ATTACHMENT_EXT
+    );
+    expect(refs).toHaveLength(1);
+    expect(refs[0].ref).toBe("https://host/image.png");
+    expect(refs[0].altText).toBe("Схема");
   });
 });
 

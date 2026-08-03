@@ -5,10 +5,10 @@ export type RefKind =
   | "wiki-link"
   | "md-embed"
   | "md-link"
-  | "bare-link"
   | "html-img"
   | "html-video"
-  | "html-audio";
+  | "html-audio"
+  | "html-source";
 
 export interface ParsedRef {
   fullMatch: string;
@@ -22,28 +22,71 @@ export interface ParsedRef {
 // (?<!\^) — исключает Obsidian inline footnote ^[[...]]
 const RE_WIKI = /(?<!\^)(!?\[\[)(.*?)\]\]/g;
 
-const RE_MD = /(!?\[([^\]]*)\])\(([^)]*)\)/g;
+// Markdown image/link: ![alt](url "title") / [text](url).
+// Title в кавычках после URL стрипаем отдельно.
+const RE_MD = /(!?\[([^\]]*)\])\(([^\s")]+)(?:\s+"[^"]*")?\)/g;
 
-const RE_HTML_IMG   = /<img[^>]*\bsrc="([^"]+)"[^>]*>/gi;
-const RE_HTML_VIDEO = /<video\b[^>]*\bsrc="([^"]+)"[^>]*>(?:<\/video>)?/gi;
-const RE_HTML_AUDIO = /<audio\b[^>]*\bsrc="([^"]+)"[^>]*>(?:<\/audio>)?/gi;
-
-// Obsidian bare link: [path/to/file.ext] — кликабелен в Obsidian, но без href
-//
-// Исключения (через lookbehind/lookahead):
-//   (?<![\[^!]) — не матчить если перед [ стоит [, ^, или !
-//                 → отсекает ^[...] (footnote), ![[...]] и [[...]] (частичный матч)
-//   (?!\()       — не матчить если после ] стоит (  → отсекает [text](href) (RE_MD)
-//   (?!\])       — не матчить если после ] стоит ]  → отсекает [[...]] (начало строки)
-//
-// Покрываем только известные attachment-расширения, чтобы не ловить произвольный текст.
-const BARE_EXTS = "pdf|png|jpg|jpeg|gif|webp|svg|bmp|tiff|mp4|mov|avi|mkv|webm|m4v|mp3|m4a|ogg|wav|flac|zip|rar|7z|tar|gz|doc|docx|xls|xlsx|ppt|pptx";
-const RE_BARE = new RegExp(
-  `(?<![\\[^!])\\[([^\\]\\n]+\\.(?:${BARE_EXTS}))\\](?!\\()(?!\\])`,
-  "gi"
-);
+const RE_HTML_IMG    = /<img[^>]*\bsrc="([^"]+)"[^>]*>/gi;
+const RE_HTML_VIDEO  = /<video\b[^>]*\bsrc="([^"]+)"[^>]*>(?:<\/video>)?/gi;
+const RE_HTML_AUDIO  = /<audio\b[^>]*\bsrc="([^"]+)"[^>]*>(?:<\/audio>)?/gi;
+const RE_HTML_SOURCE = /<source\b[^>]*\bsrc="([^"]+)"[^>]*>(?:<\/source>)?/gi;
 
 // ── Утилиты ──────────────────────────────────────────────────────────────────
+
+/** Checks whether a parsed reference is a file attachment embed candidate. */
+export function isAttachmentCandidate(
+  parsed: ParsedRef,
+  allowedExts: Set<string> | ReadonlySet<string>
+): boolean {
+  const { kind, ref } = parsed;
+
+  // Only explicit embeds / media tags can be attachment candidates.
+  if (
+    kind !== "wiki-embed" &&
+    kind !== "md-embed" &&
+    kind !== "html-img" &&
+    kind !== "html-video" &&
+    kind !== "html-audio" &&
+    kind !== "html-source"
+  ) {
+    return false;
+  }
+
+  const { path, anchor } = splitRef(ref);
+  const ext = refExt(ref);
+
+  // Fragment-only or note transclusion references are never file attachments.
+  if (!path) return false;
+  if (path.toLowerCase().endsWith(".md")) return false;
+
+  // Obsidian heading or block references point into a note, not a raw file.
+  if (anchor.startsWith("^") || anchor.includes("#")) return false;
+
+  // HTML media tags are allowed only when their src points to a known attachment.
+  if (kind.startsWith("html-")) {
+    return allowedExts.has(ext);
+  }
+
+  // Wiki embeds must target a real attachment file, not a note transclusion.
+  if (kind === "wiki-embed") {
+    return allowedExts.has(ext);
+  }
+
+  // Markdown embeds must target a known attachment.
+  if (kind === "md-embed") {
+    return allowedExts.has(ext);
+  }
+
+  return false;
+}
+
+/** Parse only attachment-embed candidates that should enter the sync pipeline. */
+export function parseAllAttachmentRefs(
+  content: string,
+  allowedExts: Set<string> | ReadonlySet<string>
+): ParsedRef[] {
+  return parseAllRefs(content).filter((r) => isAttachmentCandidate(r, allowedExts));
+}
 
 /**
  * Разбирает сырой ref на составляющие.
@@ -133,18 +176,6 @@ export function parseAllRefs(content: string): ParsedRef[] {
     });
   }
 
-  // Obsidian bare link: [path/file.ext] — одинарные скобки, без href
-  // Кликабельны в Obsidian (открывают файл напрямую).
-  // ^[...] (footnote) и [[...]] / ![[...]] уже исключены через RE_BARE lookbehind/lookahead.
-  for (const m of content.matchAll(RE_BARE)) {
-    results.push({
-      fullMatch: m[0],
-      ref:       m[1].trim(),
-      altText:   "",
-      kind:      "bare-link",
-    });
-  }
-
   // HTML-теги
   for (const m of content.matchAll(RE_HTML_IMG)) {
     results.push({ fullMatch: m[0], ref: m[1], altText: "", kind: "html-img" });
@@ -154,6 +185,9 @@ export function parseAllRefs(content: string): ParsedRef[] {
   }
   for (const m of content.matchAll(RE_HTML_AUDIO)) {
     results.push({ fullMatch: m[0], ref: m[1], altText: "", kind: "html-audio" });
+  }
+  for (const m of content.matchAll(RE_HTML_SOURCE)) {
+    results.push({ fullMatch: m[0], ref: m[1], altText: "", kind: "html-source" });
   }
 
   return results;

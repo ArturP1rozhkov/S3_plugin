@@ -35,8 +35,12 @@ function isIgnoredFile(name: string, ignoreFiles: string[]): boolean {
 //
 // Источники ссылок:
 //   1. metadataCache.embeds / links  — wiki-ссылки (![[file]], [[file]])
-//   2. parseAllRefs по тексту        — HTML-теги и markdown ![](ref)
+//   2. parseAllRefs по тексту        — HTML-теги, markdown embeds и links
 //      (Obsidian не кеширует HTML src= атрибуты)
+//
+// Защита от удаления шире, чем sync upload pipeline: обычная ссылка на
+// локальный attachment всё ещё считается валидной ссылкой, поэтому md-link
+// и wiki-link остаются в referenced set.
 
 async function collectReferencedFilenames(
   app: App,
@@ -70,6 +74,7 @@ async function collectReferencedFilenames(
     for (const { ref, kind } of allRefs) {
       if (
         (kind === "html-img" || kind === "html-video" || kind === "html-audio" ||
+         kind === "html-source" ||
          kind === "md-embed" || kind === "md-link") &&
         !isExternalRef(ref) &&
         !isAlreadyS3Ref(ref, settings.s3.publicEndpoint, settings.s3.endpoint, settings.s3.bucket)

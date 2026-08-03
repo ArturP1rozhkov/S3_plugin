@@ -3,7 +3,7 @@ import type { VaultS3Settings } from "../settings";
 import type { SyncState } from "../state";
 import { createS3Client, publicUrl, uploadBuffer } from "../s3Client";
 import {
-  parseAllRefs,
+  parseAllAttachmentRefs,
   isExternalRef,
   isAlreadyS3Ref,
   makeReplacement,
@@ -172,12 +172,11 @@ async function processMdFile(
   const noteRelPath = mdFile.path;
   let changes = 0;
 
-  for (const parsed of parseAllRefs(content)) {
+  for (const parsed of parseAllAttachmentRefs(content, ATTACHMENT_EXT)) {
     const { fullMatch, ref, altText, kind } = parsed;
 
     const fileExt = refExt(ref);
 
-    if (!ATTACHMENT_EXT.has(fileExt) && !isExternalRef(ref)) continue;
     if (isAlreadyS3Ref(ref, settings.s3.publicEndpoint, settings.s3.endpoint, settings.s3.bucket)) continue;
 
     let url: string | null = null;
@@ -239,22 +238,12 @@ async function processMdFile(
     // ── Replace in content ────────────────────────────────────────────────────
     let newText: string;
 
-    if (kind === "html-img" || kind === "html-video" || kind === "html-audio") {
+    if (kind === "html-img" || kind === "html-video" || kind === "html-audio" || kind === "html-source") {
       // HTML-теги: заменяем только src="..." внутри тега
       newText = fullMatch.replace(ref, url);
 
-    } else if (kind === "bare-link") {
-      // [Файлы/doc.pdf] → [doc.pdf](https://s3.../doc.pdf)
-      // Для PDF — оставляем wiki-ссылку на dummy: ![[doc.pdf]]
-      if (uploadedExt === ".pdf") {
-        newText = `![[${uploadedName}]]`;
-      } else {
-        const label = altText || uploadedName.replace(/\.[^.]+$/, "");
-        newText = `[${label}](${url})`;
-      }
-
     } else {
-      // wiki-embed, wiki-link, md-embed, md-link
+      // wiki-embed, md-embed
       newText = makeReplacement(url, uploadedName, uploadedExt, altText, settings.s3.imageWidth, kind);
     }
 
