@@ -199,6 +199,18 @@ export async function cmdCleanup(
   // 4. Перемещаем orphans в trash папку
   // settings.trashFolder берётся напрямую из VaultS3Settings (не из settings.options)
   const trashFolder = settings.trashFolder;
+
+  // Убедимся, что целевая папка существует (Obsidian .trash по умолчанию может отсутствовать,
+  // особенно если ни один файл ещё не удалялся через системный UI).
+  try {
+    await app.vault.adapter.mkdir(trashFolder);
+  } catch (err) {
+    // Ignore if folder already exists.
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw err;
+    }
+  }
+
   let moved = 0;
 
   for (const f of orphans) {

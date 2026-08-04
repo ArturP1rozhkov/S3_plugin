@@ -75,18 +75,23 @@ function resolveLocalRef(
   return found ?? null;
 }
 
+export type UploadResult =
+  | { status: "ok"; url: string }
+  | { status: "empty" }
+  | { status: "error" };
+
 async function uploadFile(
   app: App,
   settings: VaultS3Settings,
   client: ReturnType<typeof createS3Client>,
   file: TFile,
   noteRelPath: string
-): Promise<string | null> {
+): Promise<UploadResult> {
   try {
     const buf = await app.vault.readBinary(file);
     if (buf.byteLength === 0) {
       console.warn(`[S3 Sync] Skipping empty file: ${file.name}`);
-      return null;
+      return { status: "empty" };
     }
 
     const e = ext(file.name);
@@ -114,10 +119,10 @@ async function uploadFile(
     };
 
     await uploadBuffer(client, settings.s3, key, new Uint8Array(buf), contentType, metadata);
-    return publicUrl(settings.s3, key);
+    return { status: "ok", url: publicUrl(settings.s3, key) };
   } catch (err) {
     console.error(`[S3 Sync] Upload failed: ${file.name}`, err);
-    return null;
+    return { status: "error" };
   }
 }
 
@@ -161,13 +166,14 @@ function consoleLogger(): SyncLogger {
 
 // ── Process a single .md file ─────────────────────────────────────────────────
 
-async function processMdFile(
+export async function processMdFile(
   app: App,
   settings: VaultS3Settings,
   client: ReturnType<typeof createS3Client>,
   state: SyncState,
   mdFile: TFile,
-  logger: SyncLogger
+  logger: SyncLogger,
+  onEmpty?: (fileName: string, notePath: string) => void
 ): Promise<number> {
   let content = await app.vault.read(mdFile);
   const noteRelPath = mdFile.path;
@@ -226,9 +232,21 @@ async function processMdFile(
       const fileHash = await md5Buffer(fileBuf);
       if (isAlreadyProcessed(state, localFile.path, fileHash)) continue;
 
-      url = await uploadFile(app, settings, client, localFile, noteRelPath);
-      if (!url) continue;
+      const uploadResult = await uploadFile(app, settings, client, localFile, noteRelPath);
 
+      if (uploadResult.status === "empty") {
+        logger.warn(`Skipped empty file: ${localFile.name} in ${noteRelPath}`);
+        onEmpty?.(localFile.name, noteRelPath);
+        // Не заменяем ссылку и не удаляем локальный файл, чтобы пользователь мог исправить ситуацию вручную.
+        continue;
+      }
+
+      if (uploadResult.status !== "ok") {
+        logger.error(`Upload failed: ${localFile.name}`);
+        continue;
+      }
+
+      url = uploadResult.url;
       markProcessed(state, localFile.path, fileHash, url);
       uploadedExt  = ext(localFile.name);
       uploadedName = localFile.name;
@@ -306,6 +324,7 @@ export async function cmdSync(
   new Notice(`S3 Sync: scanning ${mdFiles.length} notes…`);
 
   let totalReplacements = 0;
+  const emptyFiles: { fileName: string; notePath: string }[] = [];
   const errors: string[] = [];
   const failedLog = {
     ...log,
@@ -315,12 +334,17 @@ export async function cmdSync(
     },
   };
 
+  const onEmpty = (fileName: string, notePath: string) => {
+    emptyFiles.push({ fileName, notePath });
+  };
+
   for (let i = 0; i < mdFiles.length; i++) {
-    totalReplacements += await processMdFile(app, settings, client, state, mdFiles[i], failedLog);
+    totalReplacements += await processMdFile(app, settings, client, state, mdFiles[i], failedLog, onEmpty);
     if ((i + 1) % 50 === 0) new Notice(`S3 Sync: ${i + 1}/${mdFiles.length} notes processed…`);
   }
 
-  const success = errors.length === 0 && totalReplacements >= 0;
+  const hasWarnings = errors.length > 0 || emptyFiles.length > 0;
+  const success = !hasWarnings && totalReplacements >= 0;
   const icon = success ? "✅" : totalReplacements > 0 ? "⚠️" : "❌";
   const subtitle = targetFiles && targetFiles.length === 1
     ? `Note: ${targetFiles[0].name}`
@@ -336,20 +360,60 @@ export async function cmdSync(
         rows: {
           "📝 Notes processed": String(mdFiles.length),
           "🔗 Embeds replaced": String(totalReplacements),
+          "⚠️ Skipped (0-byte files)": String(emptyFiles.length),
           "⚠️ Errors": errors.length > 0 ? String(errors.length) : "none",
         },
-        error: errors.length > 0,
+        error: hasWarnings,
       },
     ],
   };
 
+  const lists: ResultData["lists"] = [];
+
+  if (emptyFiles.length > 0) {
+    lists.push({
+      title: "Skipped empty files",
+      icon: "⚠️",
+      items: emptyFiles.slice(0, 50).map((e) => ({
+        label: e.fileName,
+        value: e.notePath,
+      })),
+      initiallyExpanded: true,
+    });
+  }
+
   if (errors.length > 0) {
-    data.lists = [{
+    lists.push({
       title: "Errors",
       icon: "❌",
       items: errors.slice(0, 50).map((e) => ({ label: e })),
       initiallyExpanded: true,
-    }];
+    });
+  }
+
+  if (lists.length > 0) {
+    data.lists = lists;
+  }
+
+  // Предупреждение об исходных 0-байтовых файлах, если такие были найдены.
+  if (emptyFiles.length > 0) {
+    const uniqueEmpty = [...new Map(emptyFiles.map((e) => [e.fileName, e])).values()];
+    data.sections.push({
+      title: "",
+      rows: {
+        "ℹ️ 0-byte files skipped": uniqueEmpty.length > 1
+          ? `${uniqueEmpty.length} files were not uploaded because they contain 0 bytes`
+          : `"${uniqueEmpty[0].fileName}" was not uploaded because it contains 0 bytes`,
+      },
+    });
+    data.sections.push({
+      title: "",
+      rows: {
+        "🛠️ Recommended action":
+          "These files contain 0 bytes and were not uploaded. " +
+          "Links to them in your notes were left unchanged — find the original file or remove the link manually.",
+      },
+    });
   }
 
   new ResultModal(app, data).open();

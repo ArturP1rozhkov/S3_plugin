@@ -55,10 +55,10 @@ export const DEFAULT_SETTINGS: VaultS3Settings = {
     publicUrlStyle: "path",
   },
   attachmentFolders: ["Картинки", "Attachments", "Файлы"],
-  ignoreFolders: [".git", ".obsidian", ".trash", ".trash_attachments", ".vault_tools"],
+  ignoreFolders: [".git", ".obsidian", ".trash", ".vault_tools"],
   ignoreFiles: [".gitignore", ".gitkeep", "*.json", "*.yaml", "*.yml", "*.css", "*.js", "database*"],
   pdfDummyFolder: "Файлы",
-  trashFolder: ".trash_attachments",
+  trashFolder: ".trash",
   trashRetentionDays: 7,
   downloadExternalImages: true,
   externalImageTimeoutSec: 10,
@@ -159,7 +159,7 @@ export class VaultS3SettingTab extends PluginSettingTab {
       .addToggle(t => t.setValue(this.plugin.settings.downloadExternalImages)
         .onChange(async v => { this.plugin.settings.downloadExternalImages = v; await this.plugin.saveSettings(); }));
 
-    new Setting(containerEl).setName("Trash folder").setDesc("Local orphan files are moved here during cleanup")
+    new Setting(containerEl).setName("Trash folder").setDesc(`Local orphan files are moved here during cleanup (default: ${DEFAULT_SETTINGS.trashFolder})`)
       .addText(t => t.setValue(this.plugin.settings.trashFolder)
         .onChange(async v => { this.plugin.settings.trashFolder = v.trim(); await this.plugin.saveSettings(); }));
 

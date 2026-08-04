@@ -73,4 +73,17 @@ describe("migrateSettings", () => {
     expect(migrated.s3.imageWidth).toBe(DEFAULT_SETTINGS.s3.imageWidth);
     expect(migrated.s3.hashFilenames).toBe(DEFAULT_SETTINGS.s3.hashFilenames);
   });
+
+  it("migrates old default trash folder to Obsidian .trash", () => {
+    const data = { trashFolder: ".trash_attachments" };
+    const migrated = migrateSettings(data);
+    expect(migrated.trashFolder).toBe(DEFAULT_SETTINGS.trashFolder);
+    expect(migrated.trashFolder).toBe(".trash");
+  });
+
+  it("preserves custom trash folder", () => {
+    const data = { trashFolder: "my_custom_trash" };
+    const migrated = migrateSettings(data);
+    expect(migrated.trashFolder).toBe("my_custom_trash");
+  });
 });

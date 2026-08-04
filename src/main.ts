@@ -15,6 +15,10 @@ export function migrateSettings(data: unknown): VaultS3Settings {
     // Older versions behaved like virtual-host style (bucket was omitted from public URL).
     settings.s3.publicUrlStyle = "virtual-host";
   }
+  if (incoming.trashFolder === ".trash_attachments") {
+    // Old default; migrate to the new Obsidian-system trash folder.
+    settings.trashFolder = DEFAULT_SETTINGS.trashFolder;
+  }
   return settings;
 }
 
