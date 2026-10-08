@@ -1,10 +1,12 @@
 import {
   S3Client,
   PutObjectCommand,
+  HeadObjectCommand,
   ListObjectsV2Command,
   CopyObjectCommand,
   DeleteObjectCommand,
   type ListObjectsV2CommandOutput,
+  type HeadObjectCommandOutput,
 } from "@aws-sdk/client-s3";
 import type { S3Config } from "./settings";
 
@@ -43,6 +45,27 @@ export async function uploadBuffer(
     ContentType: contentType,
     Metadata: metadata,
   }));
+}
+
+export async function headObject(
+  client: S3Client,
+  cfg: S3Config,
+  key: string
+): Promise<HeadObjectCommandOutput | null> {
+  try {
+    return await client.send(new HeadObjectCommand({ Bucket: cfg.bucket, Key: key }));
+  } catch (err: any) {
+    // AWS SDK v3 throws NoSuchKey / NotFound variants. Normalize by status code / error name.
+    if (
+      err?.$metadata?.httpStatusCode === 404 ||
+      err?.name === "NotFound" ||
+      err?.Code === "NoSuchKey" ||
+      err?.Code === "404"
+    ) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 export async function listAllObjects(

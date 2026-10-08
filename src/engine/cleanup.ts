@@ -99,7 +99,8 @@ async function collectReferencedFilenames(
       if (
         (kind === "html-img" || kind === "html-video" || kind === "html-audio" ||
          kind === "html-source" ||
-         kind === "md-embed" || kind === "md-link") &&
+         kind === "md-embed" || kind === "md-link" ||
+         kind === "wiki-embed" || kind === "wiki-link") &&
         !isExternalRef(ref) &&
         !isAlreadyS3Ref(ref, settings.s3.publicEndpoint, settings.s3.endpoint, settings.s3.bucket)
       ) {
@@ -132,10 +133,13 @@ export async function cmdCleanup(
   const referenced = await collectReferencedFilenames(app, settings);
   log.info(`Referenced attachment filenames: ${referenced.size}`);
 
-  // 2. Обходим attachment folders и ищем orphans
+  // 2. Обходим attachment folders + pdfDummyFolder и ищем orphans.
+  // pdfDummyFolder сканируем явно, даже если он не указан в attachmentFolders,
+  // чтобы dummy PDF, на которые есть ссылки, не считались orphan.
   const orphans: TFile[] = [];
+  const foldersToScan = new Set([...settings.attachmentFolders, settings.pdfDummyFolder]);
 
-  for (const folderName of settings.attachmentFolders) {
+  for (const folderName of foldersToScan) {
     const folder = app.vault.getAbstractFileByPath(normalizePath(folderName));
     if (!folder) continue;
 

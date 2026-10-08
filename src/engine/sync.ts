@@ -1,12 +1,13 @@
 import { App, Notice, TFile, normalizePath } from "obsidian";
 import type { VaultS3Settings } from "../settings";
 import type { SyncState } from "../state";
-import { createS3Client, publicUrl, uploadBuffer } from "../s3Client";
+import { createS3Client, publicUrl, uploadBuffer, headObject } from "../s3Client";
 import {
   parseAllAttachmentRefs,
   isExternalRef,
   isAlreadyS3Ref,
   makeReplacement,
+  parseWikilinkSize,
   splitRef,
   refExt,
   refFilename,
@@ -18,6 +19,7 @@ import {
   s3Key,
   DEFAULT_FOLDER_MAP,
 } from "./fileClassifier";
+import { md5Buffer } from "./md5";
 import { ensurePdfDummy, isDummyPdf } from "./pdfDummy";
 import {
   isAlreadyProcessed,
@@ -32,12 +34,6 @@ import {
 function ext(filename: string): string {
   const i = filename.lastIndexOf(".");
   return i >= 0 ? filename.slice(i).toLowerCase() : "";
-}
-
-async function md5Buffer(buf: ArrayBuffer): Promise<string> {
-  const hashBuf = await crypto.subtle.digest("SHA-256", buf);
-  const arr = Array.from(new Uint8Array(hashBuf));
-  return arr.map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
 }
 
 function isIgnored(path: string, ignoreFolders: string[]): boolean {
@@ -95,10 +91,21 @@ async function uploadFile(
     }
 
     const e = ext(file.name);
-    const hash = await md5Buffer(buf);
+    const hash = md5Buffer(buf);
     const filename = settings.s3.hashFilenames ? `${hash}${e}` : file.name;
     const folderMap = settings.s3.folderMap ?? DEFAULT_FOLDER_MAP;
     const key = s3Key(folderMap, filename, e);
+
+    // Проверяем, нет ли уже в S3 идентичного объекта (по ключу/ETag/размеру),
+    // чтобы избежать повторной загрузки того же файла.
+    const existing = await headObject(client, settings.s3, key);
+    if (
+      existing &&
+      existing.ContentLength === buf.byteLength &&
+      (existing.ETag ?? "").replace(/^"|"$/g, "") === hash
+    ) {
+      return { status: "ok", url: publicUrl(settings.s3, key) };
+    }
 
     const contentTypeMap: Record<string, string> = {
       ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -190,6 +197,7 @@ export async function processMdFile(
     let localFile: TFile | null = null;
     let uploadedExt  = fileExt;
     let uploadedName = refFilename(ref);
+    let fileHash: string | null = null;
 
     // ── External URL ─────────────────────────────────────────────────────────
     if (isExternalRef(ref)) {
@@ -199,19 +207,28 @@ export async function processMdFile(
       const downloaded = await downloadExternal(ref, (settings.externalImageTimeoutSec ?? 10) * 1000);
       if (!downloaded) { recordFailed(state, ref); logger.warn(`External download failed: ${ref}`); continue; }
 
-      const hash = await md5Buffer(downloaded.buf);
+      fileHash = md5Buffer(downloaded.buf);
       uploadedExt  = downloaded.ext;
-      uploadedName = `${hash}${uploadedExt}`;
+      uploadedName = `${fileHash}${uploadedExt}`;
       const key    = s3Key(settings.s3.folderMap ?? DEFAULT_FOLDER_MAP, uploadedName, uploadedExt);
 
       try {
-        await uploadBuffer(client, settings.s3, key, new Uint8Array(downloaded.buf), "image/jpeg", {
-          "source-vault": app.vault.getName(),
-          "uploaded-by":  "vault-s3-sync",
-          "original-url": encodeURIComponent(ref),
-        });
-        url = publicUrl(settings.s3, key);
-        state.processed[`ext:${simpleHash(ref)}`] = { hash, s3url: url, processedAt: new Date().toISOString() };
+        const existing = await headObject(client, settings.s3, key);
+        if (
+          existing &&
+          existing.ContentLength === downloaded.buf.byteLength &&
+          (existing.ETag ?? "").replace(/^"|"$/g, "") === fileHash
+        ) {
+          url = publicUrl(settings.s3, key);
+        } else {
+          await uploadBuffer(client, settings.s3, key, new Uint8Array(downloaded.buf), "image/jpeg", {
+            "source-vault": app.vault.getName(),
+            "uploaded-by":  "vault-s3-sync",
+            "original-url": encodeURIComponent(ref),
+          });
+          url = publicUrl(settings.s3, key);
+        }
+        state.processed[`ext:${simpleHash(ref)}`] = { hash: fileHash, s3url: url, processedAt: new Date().toISOString() };
       } catch (err) {
         recordFailed(state, ref); logger.error(`External upload failed: ${ref}`); continue;
       }
@@ -229,7 +246,7 @@ export async function processMdFile(
       }
 
       const fileBuf  = await app.vault.readBinary(localFile);
-      const fileHash = await md5Buffer(fileBuf);
+      fileHash = md5Buffer(fileBuf);
       if (isAlreadyProcessed(state, localFile.path, fileHash)) continue;
 
       const uploadResult = await uploadFile(app, settings, client, localFile, noteRelPath);
@@ -261,31 +278,39 @@ export async function processMdFile(
       // HTML-теги: заменяем только src="..." внутри тега
       newText = fullMatch.replace(ref, url);
 
+    } else if (uploadedExt === ".pdf" && (kind === "wiki-embed" || kind === "wiki-link") && fileHash) {
+      // PDF wiki-links/embeds: унифицированный pipeline — всегда wiki-embed на локальный dummy.
+      try {
+        const dummyName = await ensurePdfDummy(app, settings, uploadedName, fileHash, url);
+        newText = `![[${dummyName}]]`;
+        logger.info(`PDF dummy ensured: ${dummyName}`);
+      } catch (err) {
+        logger.error(`Failed to ensure PDF dummy '${uploadedName}': ${err}`);
+        continue;
+      }
+
     } else {
       // wiki-embed, md-embed
-      newText = makeReplacement(url, uploadedName, uploadedExt, altText, settings.s3.imageWidth, kind);
+      // Для wiki-ссылок после pipe может идти ширина / размеры: [[file|750]] / [[file|300x200]]
+      let replacementWidth = settings.s3.imageWidth;
+      if (kind === "wiki-embed" || kind === "wiki-link") {
+        const parsed = parseWikilinkSize(altText);
+        if (parsed) replacementWidth = parsed;
+      }
+      newText = makeReplacement(url, uploadedName, uploadedExt, altText, replacementWidth, kind);
     }
 
-    content = content.replace(fullMatch, newText);
+    // Используем callback, чтобы $ в newText не интерпретировался как шаблон замены.
+    content = content.replace(fullMatch, () => newText);
     changes++;
 
-    // Удаляем локальный файл после успешной загрузки
+    // Удаляем локальный файл после успешной загрузки (и после создания dummy).
     if (localFile) {
       try {
         await app.vault.delete(localFile);
         logger.info(`Uploaded & removed: ${localFile.name} → ${url}`);
       } catch (err) {
         logger.warn(`Could not delete local file: ${localFile.name}`);
-      }
-    }
-
-    // PDF dummy — создаём ПОСЛЕ удаления оригинала.
-    if (uploadedExt === ".pdf") {
-      try {
-        await ensurePdfDummy(app, settings, uploadedName, url);
-        logger.info(`PDF dummy created: ${uploadedName}`);
-      } catch (err) {
-        logger.error(`Failed to create PDF dummy '${uploadedName}': ${err}`);
       }
     }
   }

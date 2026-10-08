@@ -19,8 +19,10 @@ export interface ParsedRef {
 
 // ── Регулярки ────────────────────────────────────────────────────────────────
 
-// (?<!\^) — исключает Obsidian inline footnote ^[[...]]
-const RE_WIKI = /(?<!\^)(!?\[\[)(.*?)\]\]/g;
+// Раздельные регэкспы для embed и обычных wiki-ссылок.
+// Embed: ![[file]] | ![[file|750]] | ![[file|300x200]]
+const RE_WIKI_EMBED = /(?<!\^)!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+const RE_WIKI_LINK  = /(?<!\^)\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
 
 // Markdown image/link: ![alt](url "title") / [text](url).
 // Title в кавычках после URL стрипаем отдельно.
@@ -40,9 +42,12 @@ export function isAttachmentCandidate(
 ): boolean {
   const { kind, ref } = parsed;
 
-  // Only explicit embeds / media tags can be attachment candidates.
+  // Explicit embeds / media tags are always candidates.
+  // Non-embed wiki-link [[file.png]] is a candidate only when it points
+  // to a real attachment file (checked via extension below).
   if (
     kind !== "wiki-embed" &&
+    kind !== "wiki-link" &&
     kind !== "md-embed" &&
     kind !== "html-img" &&
     kind !== "html-video" &&
@@ -67,8 +72,9 @@ export function isAttachmentCandidate(
     return allowedExts.has(ext);
   }
 
-  // Wiki embeds must target a real attachment file, not a note transclusion.
-  if (kind === "wiki-embed") {
+  // Wiki embeds and plain wiki links must target a real attachment file,
+  // not a note transclusion or a link to another markdown note.
+  if (kind === "wiki-embed" || kind === "wiki-link") {
     return allowedExts.has(ext);
   }
 
@@ -135,6 +141,12 @@ export function isExternalRef(ref: string): boolean {
   return ref.startsWith("http://") || ref.startsWith("https://");
 }
 
+/** Extracts a numeric width from a wikilink pipe alias such as "750" or "300x200". */
+export function parseWikilinkSize(alias: string): number | undefined {
+  const m = alias.trim().match(/^(\d+)(?:x\d+)?$/i);
+  return m ? parseInt(m[1], 10) : undefined;
+}
+
 export function isAlreadyS3Ref(
   ref: string,
   publicEndpoint: string,
@@ -152,17 +164,32 @@ export function isAlreadyS3Ref(
 export function parseAllRefs(content: string): ParsedRef[] {
   const results: ParsedRef[] = [];
 
-  // Wiki-ссылки: [[file]] и ![[file]]
-  // ^[[...]] (Obsidian inline footnote) исключены через (?<!\^) в RE_WIKI
-  for (const m of content.matchAll(RE_WIKI)) {
-    const embed = m[0].startsWith("!");
-    const inner = m[2].trim();
-    const [refPart, ...aliasParts] = inner.split("|");
+  // Wiki embeds: ![[file]], ![[file|750]], ![[file|300x200]]
+  // ^[[...]] (Obsidian inline footnote) исключены через (?<!\^).
+  const embedRanges: Array<[number, number]> = [];
+  for (const m of content.matchAll(RE_WIKI_EMBED)) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    embedRanges.push([start, end]);
     results.push({
       fullMatch: m[0],
-      ref:       refPart.trim(),
-      altText:   aliasParts.join("|").trim(),
-      kind:      embed ? "wiki-embed" : "wiki-link",
+      ref:       m[1].trim(),
+      altText:   (m[2] ?? "").trim(),
+      kind:      "wiki-embed",
+    });
+  }
+
+  // Обычные wiki-ссылки: [[file]], [[file|alias]].
+  // Пропускаем диапазоны, уже занятые embed, чтобы ![[file]] не дублировался.
+  for (const m of content.matchAll(RE_WIKI_LINK)) {
+    const start = m.index ?? 0;
+    const end = start + m[0].length;
+    if (embedRanges.some(([s, e]) => start >= s && end <= e)) continue;
+    results.push({
+      fullMatch: m[0],
+      ref:       m[1].trim(),
+      altText:   (m[2] ?? "").trim(),
+      kind:      "wiki-link",
     });
   }
 
@@ -208,15 +235,25 @@ export function makeReplacement(
   kind?: RefKind
 ): string {
   const w = imageWidth ?? 550;
+  const label = altText || filename.replace(/\.[^.]+$/, "");
+
+  // Non-embed wiki-link [[file.png]] is replaced with a markdown reference.
+  // Images become markdown images (so the width alias can be honored),
+  // everything else becomes a plain markdown link.
+  // PDF — исключение: всегда wiki-embed на dummy файл в vault (для PDF++ plugin),
+  // независимо от того, была исходная ссылка ![[...]] или [[...]].
+  if (kind === "wiki-link" && fileExt !== ".pdf") {
+    if (IMAGE_EXT.has(fileExt)) return `![|${w}](${url})`;
+    return `[${label}](${url})`;
+  }
 
   if (IMAGE_EXT.has(fileExt)) return `![|${w}](${url})`;
   if (VIDEO_EXT.has(fileExt)) return `<video src="${url}" controls></video>`;
   if (AUDIO_EXT.has(fileExt)) return `<audio src="${url}" controls></audio>`;
 
-  // PDF всегда остаётся как wiki-ссылка на dummy файл в vault (для PDF++ plugin)
+  // PDF остаётся как wiki-embed на dummy файл в vault (для PDF++ plugin)
   if (fileExt === ".pdf") return `![[${filename}]]`;
 
   // doc/archive/other — обычная markdown-ссылка
-  const label = altText || filename.replace(/\.[^.]+$/, "");
   return `[${label}](${url})`;
 }

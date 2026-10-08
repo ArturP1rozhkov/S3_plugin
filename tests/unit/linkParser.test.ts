@@ -6,6 +6,7 @@ import {
   makeReplacement,
   parseAllAttachmentRefs,
   parseAllRefs,
+  parseWikilinkSize,
   refExt,
   refFilename,
   splitRef,
@@ -154,6 +155,10 @@ describe("isAttachmentCandidate", () => {
     ["wiki-embed pdf", "![[Files/file.pdf]]", true],
     ["wiki-embed audio", "![[Files/audio.mp3]]", true],
     ["wiki-embed video", "![[Files/video.mp4]]", true],
+    ["wiki-link image", "[[Files/photo.png]]", true],
+    ["wiki-link image with alias", "[[Files/photo.png|Открыть]]", true],
+    ["wiki-link pdf", "[[Files/file.pdf]]", true],
+    ["wiki-link pdf with alias", "[[Files/file.pdf|Открыть]]", true],
     ["markdown-embed image", "![alt](https://host/image.png)", true],
     ["markdown-embed image with title", '![Схема](https://host/image.png "title")', true],
     ["markdown-embed local image", "![alt](Files/photo.jpg)", true],
@@ -167,10 +172,9 @@ describe("isAttachmentCandidate", () => {
   });
 
   it.each([
-    ["wiki-link pdf", "[[Files/file.pdf]]", false],
-    ["wiki-link pdf with alias", "[[Files/file.pdf|Открыть]]", false],
-    ["wiki-link image", "[[Files/photo.png|Открыть]]", false],
     ["wiki-link note", "[[Обычная заметка]]", false],
+    ["wiki-link md note", "[[Обычная заметка.md]]", false],
+    ["wiki-link heading transclusion", "[[Заметка#Заголовок]]", false],
     ["markdown-link image", "[Обычная ссылка](https://host/image.jpg)", false],
     ["markdown-link pdf", "[Открыть PDF](Files/file.pdf)", false],
     ["markdown-link external pdf", "[Открыть PDF](https://host/file.pdf)", false],
@@ -209,7 +213,7 @@ describe("parseAllAttachmentRefs", () => {
 
     const refs = parseAllAttachmentRefs(content, ATTACHMENT_EXT);
     const kinds = refs.map((r) => r.kind);
-    expect(kinds).toEqual(["wiki-embed", "md-embed", "html-img"]);
+    expect(kinds).toEqual(["wiki-embed", "wiki-link", "md-embed", "html-img"]);
   });
 
   it("replaces only the embed when link and embed share the same URL", () => {
@@ -272,5 +276,19 @@ describe("makeReplacement", () => {
     expect(makeReplacement(url, "image.png", ".png", "", 750)).toBe(
       `![|750](${url})`
     );
+  });
+});
+
+describe("parseWikilinkSize", () => {
+  it.each([
+    ["", undefined],
+    ["750", 750],
+    ["300x200", 300],
+    ["550x", undefined],
+    ["x200", undefined],
+    ["caption", undefined],
+    ["  800x600  ", 800],
+  ])("parses %s as %s", (alias, expected) => {
+    expect(parseWikilinkSize(alias)).toBe(expected);
   });
 });
