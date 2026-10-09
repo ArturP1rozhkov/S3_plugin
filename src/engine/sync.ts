@@ -4,6 +4,8 @@ import type { SyncState } from "../state";
 import { createS3Client, publicUrl, uploadBuffer, headObject } from "../s3Client";
 import {
   parseAllAttachmentRefs,
+  parseAllRefs,
+  canonicalMediaTag,
   isExternalRef,
   isAlreadyS3Ref,
   makeReplacement,
@@ -196,6 +198,23 @@ export async function processMdFile(
   // Иначе любая ошибка/исключение после удаления оставляли заметку со
   // ссылками на уже исчезнувшие файлы.
   const deletions: TFile[] = [];
+
+  // ── Нормализация формы ссылок, уже указывающих на наш S3 ────────────────────
+  // Такие ссылки парсер отдаёт как внешние (и правильно: повторно загружать
+  // нечего), но если форма испорчена — например видео вставлено картинкой
+  // `![name](…mp4)` — Obsidian рисует битую картинку с исходным именем в alt.
+  // Починить это может только sync, поэтому правим форму до основного прохода.
+  for (const parsed of parseAllRefs(content)) {
+    const { fullMatch, ref, kind } = parsed;
+    if (!isAlreadyS3Ref(ref, settings.s3.publicEndpoint, settings.s3.endpoint, settings.s3.bucket)) continue;
+
+    const fixed = canonicalMediaTag(kind, ref);
+    if (!fixed || fixed === fullMatch) continue;
+
+    content = content.replace(fullMatch, () => fixed);
+    changes++;
+    logger.info(`Normalized S3 media form (${kind}) in ${noteRelPath}`);
+  }
 
   for (const parsed of parseAllAttachmentRefs(content, ATTACHMENT_EXT)) {
     const { fullMatch, ref, altText, kind } = parsed;

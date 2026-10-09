@@ -805,6 +805,71 @@ describe("processMdFile S3 key canonicalization", () => {
   });
 });
 
+// Ссылки, которые уже указывают на наш S3, не попадают в attachment-кандидаты.
+// Если их форма испорчена (видео вставлено картинкой), починить её может только
+// отдельный проход нормализации — иначе битый рендер остаётся навсегда.
+describe("processMdFile normalization of already-S3 media refs", () => {
+  const base = "http://127.0.0.1:9000/obsidian-plugin-test";
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    s3: { ...DEFAULT_SETTINGS.s3, publicEndpoint: base, bucket: "obsidian-plugin-test" },
+  };
+  const mp4 = `${base}/media/737f3370db5b06d4b5465358e8957551.mp4`;
+  const png = `${base}/media/2ca36c9cd0a42a67f95c164814426b42.png`;
+
+  it("repairs a video that was embedded as an image", async () => {
+    const { app, mdFile } = makeAppWithFiles(
+      [],
+      [
+        `![Pasted image 20261009121119](${mp4})`,
+        `![](${mp4})`,
+        `<img src="${mp4}">`,
+      ].join("\n")
+    );
+    const client = makeClient();
+
+    const changes = await (processMdFile as any)(
+      app,
+      settings,
+      client,
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(3);
+    const player = `<video src="${mp4}" controls></video>`;
+    expect(app.vault.modify.mock.calls[0][1]).toBe([player, player, player].join("\n"));
+    // Ничего не грузим: объект уже в бакете.
+    expect(client.send).not.toHaveBeenCalled();
+  });
+
+  it("leaves already-canonical forms untouched", async () => {
+    const { app, mdFile } = makeAppWithFiles(
+      [],
+      [
+        `<video src="${mp4}" controls></video>`,
+        `[video](${mp4})`,
+        `![|550](${png})`,
+      ].join("\n")
+    );
+    const client = makeClient();
+
+    const changes = await (processMdFile as any)(
+      app,
+      settings,
+      client,
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(0);
+    expect(app.vault.modify).not.toHaveBeenCalled();
+    expect(client.send).not.toHaveBeenCalled();
+  });
+});
+
 // ── Независимость от режима ссылок Obsidian ──────────────────────────────────
 // Настройка «Файлы и ссылки → Использовать [[wiki-ссылки]]» не должна влиять
 // на результат sync: ![[x]]/[[x]] и ![alt](x)/[alt](x) обрабатываются одинаково.

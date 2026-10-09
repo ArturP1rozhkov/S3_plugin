@@ -233,6 +233,32 @@ const IMAGE_EXT = new Set([".png",".jpg",".jpeg",".gif",".webp",".svg",".bmp",".
 const VIDEO_EXT = new Set([".mp4",".mov",".avi",".mkv",".webm",".m4v",".ogv"]);
 const AUDIO_EXT = new Set([".mp3",".m4a",".ogg",".wav",".flac",".3gp"]);
 
+/**
+ * Нормализация формы ссылки, которая УЖЕ указывает на наш S3.
+ *
+ * Такие ссылки не попадают в attachment-кандидаты (внешние отсеиваются), поэтому
+ * sync их не переписывает — и однажды испорченная форма остаётся навсегда.
+ * Типовой случай: видео/аудио записано картинкой (`![name](…mp4)`), Obsidian
+ * рисует вместо файла битую картинку и подставляет alt с исходным именем.
+ *
+ * Возвращает канонический тег плеера, если форма требует починки, иначе null.
+ * Ссылки-ссылки (`[name](…mp4)`) не трогаем — они корректно рендерятся.
+ */
+export function canonicalMediaTag(kind: RefKind, ref: string): string | null {
+  const ext = refExt(ref);
+  const isVideo = VIDEO_EXT.has(ext);
+  const isAudio = AUDIO_EXT.has(ext);
+  if (!isVideo && !isAudio) return null;
+
+  // Починка нужна только там, где медиа вставлено как картинка.
+  const renderedAsImage = kind === "md-embed" || kind === "wiki-embed" || kind === "html-img";
+  if (!renderedAsImage) return null;
+
+  return isVideo
+    ? `<video src="${ref}" controls></video>`
+    : `<audio src="${ref}" controls></audio>`;
+}
+
 export function makeReplacement(
   url: string,
   filename: string,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalMediaTag,
   isAlreadyS3Ref,
   isAttachmentCandidate,
   isExternalRef,
@@ -334,6 +335,27 @@ describe("makeReplacement", () => {
     expect(makeReplacement(url, "report.pdf", ".pdf", "документ", 550, "md-link")).toBe(
       "![[report.pdf]]"
     );
+  });
+});
+
+describe("canonicalMediaTag", () => {
+  const mp4 = "https://s3.example/media/a.mp4";
+  const mp3 = "https://s3.example/media/a.mp3";
+  const png = "https://s3.example/media/a.png";
+
+  it("rewrites video/audio that was embedded as an image", () => {
+    expect(canonicalMediaTag("md-embed", mp4)).toBe(`<video src="${mp4}" controls></video>`);
+    expect(canonicalMediaTag("wiki-embed", mp4)).toBe(`<video src="${mp4}" controls></video>`);
+    expect(canonicalMediaTag("html-img", mp3)).toBe(`<audio src="${mp3}" controls></audio>`);
+  });
+
+  it("leaves correct forms untouched", () => {
+    expect(canonicalMediaTag("html-video", mp4)).toBeNull();
+    expect(canonicalMediaTag("html-source", mp4)).toBeNull();
+    expect(canonicalMediaTag("wiki-link", mp4)).toBeNull();
+    expect(canonicalMediaTag("md-link", mp4)).toBeNull();
+    expect(canonicalMediaTag("md-embed", png)).toBeNull();
+    expect(canonicalMediaTag("md-embed", "https://s3.example/docs/a.pdf")).toBeNull();
   });
 });
 
