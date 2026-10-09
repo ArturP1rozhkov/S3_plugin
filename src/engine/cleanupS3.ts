@@ -135,10 +135,34 @@ export async function cmdCleanupS3(
     `${(totalSize / 1024 / 1024).toFixed(2)} MB`
   );
 
+  // Сирот нет — подтверждение не нужно, просто сообщаем результат.
+  // Раньше в этом случае всё равно спрашивали «Move 0 object(s)?».
+  if (orphans.length === 0) {
+    const data: ResultData = {
+      title: "Cleanup S3 — Nothing to Do",
+      icon: "✅",
+      subtitle: "No orphan objects found in the bucket",
+      sections: [
+        {
+          title: "",
+          rows: {
+            "☁️ Objects in bucket": String(allObjects.length),
+            "🔗 Referenced by notes": String(referencedKeys.size),
+          },
+        },
+      ],
+    };
+    new ResultModal(app, data).open();
+    return { moved: 0 };
+  }
+
   if (dryRun) {
     showCleanupS3Result(app, true, { orphans, totalSize });
     return { moved: 0 };
   }
+
+  // ── Сначала показываем найденное, потом спрашиваем подтверждение ──────────
+  showCleanupS3Result(app, true, { orphans, totalSize }, "Cleanup S3 — Found Orphans");
 
   // ── Confirm before real move ──────────────────────────────────────────────
   const confirmed = await askConfirmation(
@@ -216,7 +240,8 @@ function groupByPrefix(keys: string[]): Record<string, string[]> {
 function showCleanupS3Result(
   app: App,
   dryRun: boolean,
-  input: CleanupS3ResultInput
+  input: CleanupS3ResultInput,
+  titleOverride?: string
 ): void {
   const { orphans = [], moved = 0, deleted = 0, totalSize = 0, error } = input;
 
@@ -267,7 +292,7 @@ function showCleanupS3Result(
   }
 
   const data: ResultData = {
-    title: dryRun ? "Cleanup S3 - Dry Run" : "Cleanup S3 - Completed",
+    title: titleOverride ?? (dryRun ? "Cleanup S3 - Dry Run" : "Cleanup S3 - Completed"),
     icon: dryRun ? "🔍" : "☁️🗑️",
     subtitle: dryRun
       ? `${orphans.length} orphan object(s) found`

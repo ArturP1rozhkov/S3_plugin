@@ -320,3 +320,25 @@ describe("cmdCleanup URL-encoded references", () => {
     expect(res.orphans).toBe(0);
   });
 });
+
+describe("cmdCleanup with nothing to move", () => {
+  it("does not ask for confirmation when there are no orphans", async () => {
+    const { app } = makeCleanupApp([
+      { name: "note.md", content: "![](Файлы/used.jpg)", folder: "" },
+      { name: "used.jpg", content: "img-bytes", folder: "Файлы" },
+    ]);
+
+    const res = await (cmdCleanup as any)(
+      app,
+      DEFAULT_SETTINGS,
+      { processed: {}, failedExternal: {} },
+      false
+    );
+
+    expect(res.orphans).toBe(0);
+    expect(res.moved).toBe(0);
+    // Ни подтверждения, ни подготовки папки, ни перемещений.
+    expect(app.vault.adapter.mkdir).not.toHaveBeenCalled();
+    expect(app.vault.rename).not.toHaveBeenCalled();
+  });
+});

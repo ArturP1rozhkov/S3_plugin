@@ -870,6 +870,37 @@ describe("processMdFile normalization of already-S3 media refs", () => {
   });
 });
 
+// Если Obsidian не отдаёт файл (медиа ещё открыто, редактор пересоздал файл),
+// раньше это молча оставляло копию в папке вложений. Теперь попытки
+// повторяются, а неудача попадает в отчёт.
+describe("processMdFile local file removal", () => {
+  it("reports a local file that could not be removed", async () => {
+    const { app, mdFile, files } = makeAppWithFiles(
+      [{ name: "p.png", content: "png-bytes" }],
+      "![[Картинки/p.png]]"
+    );
+    app.vault.delete.mockRejectedValue(new Error("EBUSY: resource busy or locked"));
+    const leftovers: string[] = [];
+
+    const changes = await (processMdFile as any)(
+      app,
+      DEFAULT_SETTINGS,
+      makeClient(),
+      makeState(),
+      mdFile,
+      makeLogger(),
+      undefined,
+      (name: string) => leftovers.push(name)
+    );
+
+    // Заметка всё равно переписана, но факт неудачного удаления виден.
+    expect(changes).toBe(1);
+    expect(app.vault.modify).toHaveBeenCalled();
+    expect(leftovers).toEqual(["p.png"]);
+    expect(files.has("Картинки/p.png")).toBe(true);
+  });
+});
+
 // ── Независимость от режима ссылок Obsidian ──────────────────────────────────
 // Настройка «Файлы и ссылки → Использовать [[wiki-ссылки]]» не должна влиять
 // на результат sync: ![[x]]/[[x]] и ![alt](x)/[alt](x) обрабатываются одинаково.

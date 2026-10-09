@@ -181,6 +181,45 @@ function consoleLogger(): SyncLogger {
 
 // ── Process a single .md file ─────────────────────────────────────────────────
 
+/**
+ * Удаляет локальный исходник и ПРОВЕРЯЕТ, что он действительно исчез.
+ * Obsidian может не отдать файл с первого раза (медиа ещё держит handle,
+ * редактор успевает пересоздать файл), поэтому пробуем adapter.remove и
+ * повторяем попытку. Возвращает false, если файл остался на диске.
+ */
+async function removeLocalFile(app: App, file: TFile, logger: SyncLogger): Promise<boolean> {
+  const gone = async (): Promise<boolean> => {
+    try {
+      if (typeof app.vault.adapter.exists === "function") {
+        return !(await app.vault.adapter.exists(file.path));
+      }
+    } catch { /* ignore — падаем в индекс */ }
+    return app.vault.getAbstractFileByPath(file.path) === null;
+  };
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await app.vault.delete(file);
+    } catch (err) {
+      logger.warn(`vault.delete failed for ${file.name} (attempt ${attempt}): ${err}`);
+    }
+    if (await gone()) return true;
+
+    if (typeof app.vault.adapter?.remove === "function") {
+      try {
+        await app.vault.adapter.remove(file.path);
+      } catch (err) {
+        logger.warn(`adapter.remove failed for ${file.name} (attempt ${attempt}): ${err}`);
+      }
+      if (await gone()) return true;
+    }
+
+    // Даём Obsidian отпустить файл перед повторной попыткой.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return false;
+}
+
 export async function processMdFile(
   app: App,
   settings: VaultS3Settings,
@@ -188,7 +227,8 @@ export async function processMdFile(
   state: SyncState,
   mdFile: TFile,
   logger: SyncLogger,
-  onEmpty?: (fileName: string, notePath: string) => void
+  onEmpty?: (fileName: string, notePath: string) => void,
+  onLeftover?: (fileName: string, notePath: string) => void
 ): Promise<number> {
   let content = await app.vault.read(mdFile);
   const noteRelPath = mdFile.path;
@@ -337,13 +377,16 @@ export async function processMdFile(
     logger.info(`Updated note: ${mdFile.name} (${changes} replacements)`);
   }
 
-  // Удаляем исходники только теперь, когда заметка уже переписана.
+  // Удаляем исходники только теперь, когда заметка уже переписана, и проверяем
+  // результат. Молчаливая неудача оставляла в папке вложений «невидимые» для
+  // последующих прогонов копии: заметка уже ссылается на бакет, поэтому sync
+  // такой файл больше не увидит.
   for (const file of deletions) {
-    try {
-      await app.vault.delete(file);
+    if (await removeLocalFile(app, file, logger)) {
       logger.info(`Removed local file: ${file.name}`);
-    } catch (err) {
-      logger.warn(`Could not delete local file: ${file.name}`);
+    } else {
+      logger.warn(`Local file was NOT removed: ${file.path}`);
+      onLeftover?.(file.name, noteRelPath);
     }
   }
 
@@ -377,6 +420,7 @@ export async function cmdSync(
 
   let totalReplacements = 0;
   const emptyFiles: { fileName: string; notePath: string }[] = [];
+  const leftovers: { fileName: string; notePath: string }[] = [];
   const errors: string[] = [];
   const failedLog = {
     ...log,
@@ -390,12 +434,18 @@ export async function cmdSync(
     emptyFiles.push({ fileName, notePath });
   };
 
+  const onLeftover = (fileName: string, notePath: string) => {
+    leftovers.push({ fileName, notePath });
+  };
+
   for (let i = 0; i < mdFiles.length; i++) {
-    totalReplacements += await processMdFile(app, settings, client, state, mdFiles[i], failedLog, onEmpty);
+    totalReplacements += await processMdFile(
+      app, settings, client, state, mdFiles[i], failedLog, onEmpty, onLeftover
+    );
     if ((i + 1) % 50 === 0) new Notice(`S3 Sync: ${i + 1}/${mdFiles.length} notes processed…`);
   }
 
-  const hasWarnings = errors.length > 0 || emptyFiles.length > 0;
+  const hasWarnings = errors.length > 0 || emptyFiles.length > 0 || leftovers.length > 0;
   const success = !hasWarnings && totalReplacements >= 0;
   const icon = success ? "✅" : totalReplacements > 0 ? "⚠️" : "❌";
   const subtitle = targetFiles && targetFiles.length === 1
@@ -413,6 +463,7 @@ export async function cmdSync(
           "📝 Notes processed": String(mdFiles.length),
           "🔗 Embeds replaced": String(totalReplacements),
           "⚠️ Skipped (0-byte files)": String(emptyFiles.length),
+          "⚠️ Local files kept": leftovers.length > 0 ? String(leftovers.length) : "none",
           "⚠️ Errors": errors.length > 0 ? String(errors.length) : "none",
         },
         error: hasWarnings,
@@ -440,6 +491,23 @@ export async function cmdSync(
       icon: "❌",
       items: errors.slice(0, 50).map((e) => ({ label: e })),
       initiallyExpanded: true,
+    });
+  }
+
+  if (leftovers.length > 0) {
+    lists.push({
+      title: "Uploaded, but local copy was not removed",
+      icon: "⚠️",
+      items: leftovers.slice(0, 50).map((e) => ({ label: e.fileName, value: e.notePath })),
+      initiallyExpanded: true,
+    });
+    data.sections.push({
+      title: "",
+      rows: {
+        "🛠️ Recommended action":
+          "These files are already in the bucket, but Obsidian kept the local copy " +
+          "(usually the file was still open). Run Cleanup to move them to trash.",
+      },
     });
   }
 

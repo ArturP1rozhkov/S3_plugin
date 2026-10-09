@@ -257,6 +257,27 @@ export async function cmdCleanup(
     icon: iconForFile(f.name),
   }));
 
+  // Сирот нет — подтверждение не нужно, просто сообщаем результат.
+  // Раньше в этом случае всё равно спрашивали «Move 0 file(s)?».
+  if (orphans.length === 0) {
+    const data: ResultData = {
+      title: "Cleanup — Nothing to Do",
+      icon: "✅",
+      subtitle: "No local orphan files found",
+      sections: [
+        {
+          title: "",
+          rows: {
+            "🔍 Folders scanned": [...foldersToScan].join(", "),
+            "📎 Attachments referenced by notes": String(referenced.size),
+          },
+        },
+      ],
+    };
+    new ResultModal(app, data).open();
+    return { orphans: 0, moved: 0 };
+  }
+
   if (dryRun) {
     const data: ResultData = {
       title: "Cleanup — Dry Run",
@@ -286,7 +307,34 @@ export async function cmdCleanup(
     return { orphans: orphans.length, moved: 0 };
   }
 
-  // 3. Подтверждение перед реальным перемещением
+  // 3. Сначала показываем, что нашли (со списком), и только потом спрашиваем
+  //    подтверждение на перемещение — так решение принимается по фактам.
+  const preview: ResultData = {
+    title: "Cleanup — Found Orphans",
+    icon: "🔍",
+    subtitle: `${orphans.length} orphan file(s) found`,
+    sections: [
+      {
+        title: "",
+        rows: {
+          "🗑️ Orphan files found": String(orphans.length),
+          "📦 Total size": `${(orphans.reduce((s, f) => s + f.stat.size, 0) / 1024 / 1024).toFixed(2)} MB`,
+        },
+      },
+    ],
+    lists: [
+      {
+        title: "Orphan files",
+        icon: "🔍",
+        items: orphanItems,
+        initiallyExpanded: orphanItems.length <= 15,
+        maxInitialItems: 15,
+      },
+    ],
+  };
+  new ResultModal(app, preview).open();
+
+  // 4. Подтверждение перед реальным перемещением
   const confirmed = await askConfirmation(
     app,
     `Move ${orphans.length} orphan file(s) to trash folder "${settings.trashFolder}"?`
@@ -296,7 +344,7 @@ export async function cmdCleanup(
     return { orphans: orphans.length, moved: 0 };
   }
 
-  // 4. Перемещаем orphans в trash папку
+  // 5. Перемещаем orphans в trash папку
   // settings.trashFolder берётся напрямую из VaultS3Settings (не из settings.options)
   const trashFolder = settings.trashFolder;
 
