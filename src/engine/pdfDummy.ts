@@ -60,12 +60,18 @@ async function allocateDummyPath(
 
   while (true) {
     const existing = app.vault.getAbstractFileByPath(candidatePath);
-    if (!existing) {
-      await app.vault.create(candidatePath, canonicalContent);
-      return candidatePath;
-    }
 
-    if (existing instanceof TFile) {
+    if (!existing) {
+      // Индекс vault может отставать от диска (сразу после paste/удаления).
+      // Если файл уже есть на диске, но ещё не в индексе, vault.create()
+      // упадёт с "File already exists" — и dummy не будет создан вообще.
+      // Проверяем адаптер напрямую и в таком случае дизамбигуируем имя.
+      const onDisk = await app.vault.adapter?.exists?.(candidatePath);
+      if (!onDisk) {
+        await app.vault.create(candidatePath, canonicalContent);
+        return candidatePath;
+      }
+    } else if (existing instanceof TFile) {
       const content = await app.vault.read(existing);
       // Same hash: this is our dummy (defensive, should have been found earlier).
       if (extractHash(content) === fileHash) {

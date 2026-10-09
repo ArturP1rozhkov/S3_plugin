@@ -39,6 +39,19 @@ describe("splitRef", () => {
         anchor: "page=2",
       },
     ],
+    // Режим markdown-ссылок Obsidian: путь приходит URL-кодированным.
+    [
+      "folder/file%20name.jpg?download=1#page=2",
+      {
+        path: "folder/file name.jpg",
+        query: "download=1",
+        anchor: "page=2",
+      },
+    ],
+    // %23 — это «#» внутри имени файла, а не anchor.
+    ["a%23b.png", { path: "a#b.png", query: "", anchor: "" }],
+    // Литеральный «%», не являющийся escape-последовательностью.
+    ["bad%escape.png", { path: "bad%escape.png", query: "", anchor: "" }],
   ])("normalizes %s", (raw, expected) => {
     expect(splitRef(raw)).toEqual(expected);
   });
@@ -55,6 +68,12 @@ describe("refExt and refFilename", () => {
     ["file.PDF?download=1", ".pdf", "file.PDF"],
     ["folder/file name with spaces.mp3", ".mp3", "file name with spaces.mp3"],
     ["#fnref-1", "", ""],
+    [
+      "Снимок%20экрана%202026-03-24%20095018.png",
+      ".png",
+      "Снимок экрана 2026-03-24 095018.png",
+    ],
+    ["Folder/file%20name.pdf#page=2", ".pdf", "file name.pdf"],
   ])("extracts metadata from %s", (raw, extension, filename) => {
     expect(refExt(raw)).toBe(extension);
     expect(refFilename(raw)).toBe(filename);
@@ -159,13 +178,16 @@ describe("isAttachmentCandidate", () => {
     ["wiki-link image with alias", "[[Files/photo.png|Открыть]]", true],
     ["wiki-link pdf", "[[Files/file.pdf]]", true],
     ["wiki-link pdf with alias", "[[Files/file.pdf|Открыть]]", true],
-    ["markdown-embed image", "![alt](https://host/image.png)", true],
-    ["markdown-embed image with title", '![Схема](https://host/image.png "title")', true],
     ["markdown-embed local image", "![alt](Files/photo.jpg)", true],
-    ["html image", '<img src="https://host/image.jpg" width="550">', true],
-    ["html audio", '<audio src="https://host/audio.mp3" controls></audio>', true],
-    ["html video", '<video src="https://host/video.mp4" controls></video>', true],
-    ["html source", '<source src="https://host/video.webm" type="video/webm">', true],
+    ["markdown-embed encoded local image", "![alt](Files/photo%20one.jpg)", true],
+    ["markdown-embed local pdf", "![alt](Files/file.pdf)", true],
+    ["markdown-link local image", "[фото](Files/photo.png)", true],
+    ["markdown-link local pdf", "[Открыть](Files/file.pdf)", true],
+    ["markdown-link local video", "[видео](Files/clip.mp4)", true],
+    ["html image local", '<img src="Files/photo.jpg" width="550">', true],
+    ["html video local", '<video src="Files/video.mp4" controls></video>', true],
+    ["html audio local", '<audio src="Files/audio.mp3" controls></audio>', true],
+    ["html source local", '<source src="Files/video.webm" type="video/webm">', true],
   ])("accepts %s", (_name, input, expected) => {
     const parsed = parseAllRefs(input)[0];
     expect(isAttachmentCandidate(parsed, ext)).toBe(expected);
@@ -175,9 +197,17 @@ describe("isAttachmentCandidate", () => {
     ["wiki-link note", "[[Обычная заметка]]", false],
     ["wiki-link md note", "[[Обычная заметка.md]]", false],
     ["wiki-link heading transclusion", "[[Заметка#Заголовок]]", false],
+    ["markdown-link note", "[Обычная заметка](Обычная заметка.md)", false],
+    ["markdown-link note without extension", "[Обычная заметка](Обычная заметка)", false],
     ["markdown-link image", "[Обычная ссылка](https://host/image.jpg)", false],
-    ["markdown-link pdf", "[Открыть PDF](Files/file.pdf)", false],
-    ["markdown-link external pdf", "[Открыть PDF](https://host/file.pdf)", false],
+    ["markdown-link pdf", "[Открыть PDF](https://host/file.pdf)", false],
+    ["markdown-embed external image", "![alt](https://host/image.png)", false],
+    ["markdown-embed external image with title", '![Схема](https://host/image.png "title")', false],
+    ["markdown-embed external pdf", "![alt](https://host/file.pdf)", false],
+    ["html image external", '<img src="https://host/image.jpg" width="550">', false],
+    ["html video external", '<video src="https://host/video.mp4" controls></video>', false],
+    ["html audio external", '<audio src="https://host/audio.mp3" controls></audio>', false],
+    ["html source external", '<source src="https://host/video.webm" type="video/webm">', false],
     ["bare url does not parse as ref", "https://host/image.jpg", false],
     ["autolink does not parse as ref", "<https://host/image.jpg>", false],
     ["anchor", "[Сноска](#fn-1)", false],
@@ -198,14 +228,14 @@ describe("isAttachmentCandidate", () => {
 });
 
 describe("parseAllAttachmentRefs", () => {
-  it("returns only embed candidates from mixed content", () => {
+  it("returns attachment candidates of every local form from mixed content", () => {
     const content = [
       "![[Files/file.pdf]]",
       "[[Files/file.pdf]]",
-      "![alt](https://host/image.png)",
-      "[Обычная ссылка](https://host/image.png)",
-      '<img src="https://host/image.jpg">',
-      '<a href="https://host/file.pdf">Открыть</a>',
+      "![alt](Files/image.png)",
+      "[Открыть](Files/image.png)",
+      '<img src="Files/image.jpg">',
+      '<a href="Files/file.pdf">Открыть</a>',
       "https://host/video.mp4",
       "[Сноска](#fn-1)",
       "![[Note#^block-id]]",
@@ -213,16 +243,30 @@ describe("parseAllAttachmentRefs", () => {
 
     const refs = parseAllAttachmentRefs(content, ATTACHMENT_EXT);
     const kinds = refs.map((r) => r.kind);
-    expect(kinds).toEqual(["wiki-embed", "wiki-link", "md-embed", "html-img"]);
+    expect(kinds).toEqual(["wiki-embed", "wiki-link", "md-embed", "md-link", "html-img"]);
   });
 
-  it("replaces only the embed when link and embed share the same URL", () => {
-    const url = "https://host/image.png";
-    const content = `[Обычная ссылка](${url}) и ![картинка](${url})`;
+  it("ignores external links in every form", () => {
+    const content = [
+      "![alt](https://host/image.png)",
+      "[Открыть](https://host/file.pdf)",
+      '<img src="https://host/image.jpg">',
+      '<video src="https://host/video.mp4" controls></video>',
+      '<audio src="https://host/audio.mp3" controls></audio>',
+    ].join("\n");
+
+    expect(parseAllAttachmentRefs(content, ATTACHMENT_EXT)).toEqual([]);
+  });
+
+  it("treats a local link and a local embed of the same file as two refs", () => {
+    const path = "Files/image.png";
+    const content = `[ссылка](${path}) и ![картинка](${path})`;
     const refs = parseAllAttachmentRefs(content, ATTACHMENT_EXT);
-    expect(refs).toHaveLength(1);
-    expect(refs[0].kind).toBe("md-embed");
-    expect(refs[0].fullMatch).toBe(`![картинка](${url})`);
+    expect(refs.map((r) => r.kind)).toEqual(["md-link", "md-embed"]);
+    expect(refs.map((r) => r.fullMatch)).toEqual([
+      `[ссылка](${path})`,
+      `![картинка](${path})`,
+    ]);
   });
 
   it("preserves Obsidian size aliases on image embeds", () => {
@@ -239,11 +283,11 @@ describe("parseAllAttachmentRefs", () => {
 
   it("preserves markdown image alt text and title", () => {
     const refs = parseAllAttachmentRefs(
-      '![Схема](https://host/image.png "title")',
+      '![Схема](Files/image.png "title")',
       ATTACHMENT_EXT
     );
     expect(refs).toHaveLength(1);
-    expect(refs[0].ref).toBe("https://host/image.png");
+    expect(refs[0].ref).toBe("Files/image.png");
     expect(refs[0].altText).toBe("Схема");
   });
 });
@@ -275,6 +319,20 @@ describe("makeReplacement", () => {
   it("uses a caller-provided image width", () => {
     expect(makeReplacement(url, "image.png", ".png", "", 750)).toBe(
       `![|750](${url})`
+    );
+  });
+
+  it("upgrades local markdown links exactly like wiki links", () => {
+    // Картинка: принудительный «!» + ширина, чтобы рендерилась сразу.
+    expect(makeReplacement(url, "image.jpg", ".jpg", "фото", 550, "md-link")).toBe(
+      `![|550](${url})`
+    );
+    // Не картинка: обычная ссылка, подпись из alt или из имени файла.
+    expect(makeReplacement(url, "clip.mp4", ".mp4", "видео", 550, "md-link")).toBe(
+      `[видео](${url})`
+    );
+    expect(makeReplacement(url, "report.pdf", ".pdf", "документ", 550, "md-link")).toBe(
+      "![[report.pdf]]"
     );
   });
 });

@@ -42,13 +42,11 @@ export function isAttachmentCandidate(
 ): boolean {
   const { kind, ref } = parsed;
 
-  // Explicit embeds / media tags are always candidates.
-  // Non-embed wiki-link [[file.png]] is a candidate only when it points
-  // to a real attachment file (checked via extension below).
   if (
     kind !== "wiki-embed" &&
     kind !== "wiki-link" &&
     kind !== "md-embed" &&
+    kind !== "md-link" &&
     kind !== "html-img" &&
     kind !== "html-video" &&
     kind !== "html-audio" &&
@@ -56,6 +54,11 @@ export function isAttachmentCandidate(
   ) {
     return false;
   }
+
+  // Внешние интернет-ссылки только рендерятся: их никогда не скачиваем,
+  // не загружаем в бакет и не переписываем (импорт внешних ссылок — отдельная
+  // задача, не часть sync).
+  if (isExternalRef(ref)) return false;
 
   const { path, anchor } = splitRef(ref);
   const ext = refExt(ref);
@@ -67,23 +70,10 @@ export function isAttachmentCandidate(
   // Obsidian heading or block references point into a note, not a raw file.
   if (anchor.startsWith("^") || anchor.includes("#")) return false;
 
-  // HTML media tags are allowed only when their src points to a known attachment.
-  if (kind.startsWith("html-")) {
-    return allowedExts.has(ext);
-  }
-
-  // Wiki embeds and plain wiki links must target a real attachment file,
-  // not a note transclusion or a link to another markdown note.
-  if (kind === "wiki-embed" || kind === "wiki-link") {
-    return allowedExts.has(ext);
-  }
-
-  // Markdown embeds must target a known attachment.
-  if (kind === "md-embed") {
-    return allowedExts.has(ext);
-  }
-
-  return false;
+  // Вложением считается ссылка с расширением из списка поддерживаемых.
+  // Наличие «!» (embed) или режим ссылок Obsidian на это не влияют: иначе
+  // результат sync зависел бы от настройки «Использовать [[wiki-ссылки]]».
+  return allowedExts.has(ext);
 }
 
 /** Parse only attachment-embed candidates that should enter the sync pipeline. */
@@ -92,6 +82,21 @@ export function parseAllAttachmentRefs(
   allowedExts: Set<string> | ReadonlySet<string>
 ): ParsedRef[] {
   return parseAllRefs(content).filter((r) => isAttachmentCandidate(r, allowedExts));
+}
+
+/**
+ * Obsidian в режиме markdown-ссылок записывает локальную цель в URL-виде:
+ * `Снимок%20экрана%202026-03-24%20095018.png`. Индекс vault работает с
+ * обычными именами, поэтому перед поиском файла путь нужно декодировать.
+ * Строка с литеральным «%» (не URL-escape) не должна ронять обработку.
+ */
+export function decodeRefPath(raw: string): string {
+  if (!raw.includes("%")) return raw;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 /**
@@ -115,7 +120,9 @@ export function splitRef(raw: string): { path: string; query: string; anchor: st
   const qIdx    = before.indexOf("?");
   const query   = qIdx >= 0 ? before.slice(qIdx + 1) : "";
   const path    = qIdx >= 0 ? before.slice(0, qIdx)  : before;
-  return { path: path.trim(), query, anchor };
+  // Декодируем ПОСЛЕ разделения на path/query/anchor: внешние URL выше
+  // возвращаются как есть, а `%23` в имени файла не станет anchor'ом.
+  return { path: decodeRefPath(path.trim()), query, anchor };
 }
 
 /**
@@ -237,12 +244,12 @@ export function makeReplacement(
   const w = imageWidth ?? 550;
   const label = altText || filename.replace(/\.[^.]+$/, "");
 
-  // Non-embed wiki-link [[file.png]] is replaced with a markdown reference.
-  // Images become markdown images (so the width alias can be honored),
+  // Non-embed wiki/markdown link is replaced with a markdown reference.
+  // Images become embeds (картинка должна рендериться, ширина сохраняется),
   // everything else becomes a plain markdown link.
   // PDF — исключение: всегда wiki-embed на dummy файл в vault (для PDF++ plugin),
-  // независимо от того, была исходная ссылка ![[...]] или [[...]].
-  if (kind === "wiki-link" && fileExt !== ".pdf") {
+  // независимо от исходной формы: ![[...]], [[...]], ![](...) или [](...).
+  if ((kind === "wiki-link" || kind === "md-link") && fileExt !== ".pdf") {
     if (IMAGE_EXT.has(fileExt)) return `![|${w}](${url})`;
     return `[${label}](${url})`;
   }

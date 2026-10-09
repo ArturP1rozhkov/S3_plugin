@@ -603,3 +603,337 @@ describe("processMdFile PDF handling", () => {
     expect(newContent).toBe(`![[${createdPath.split("/").pop()}]]`);
   });
 });
+
+// ── Регрессии по реальному vault ─────────────────────────────────────────────
+// В настоящем vault attachmentFolder и pdfDummyFolder — одна и та же папка
+// («Файлы»), а index vault может отставать от диска. Моки ниже это учитывают,
+// в отличие от makeApp/makeAppWithFiles выше.
+
+describe("processMdFile PDF regression (real vault layout)", () => {
+  function makeAppWithDisk(
+    filesData: { name: string; content: string; folder?: string }[],
+    noteContent: string,
+    diskOnly: string[] = []
+  ) {
+    const notePath = normalizePath("note.md");
+    const mdFile = new TFile("note.md", notePath, { size: 0 });
+    const files = new Map<string, { content: string; file: TFile }>();
+    files.set(notePath, { content: noteContent, file: mdFile });
+
+    for (const f of filesData) {
+      const folder = f.folder ?? "Файлы";
+      const path = normalizePath(`${folder}/${f.name}`);
+      files.set(path, {
+        content: f.content,
+        file: new TFile(f.name, path, { size: f.content.length }),
+      });
+    }
+
+    // Файлы, которые есть на диске, но отсутствуют в индексе Obsidian.
+    const disk = new Set<string>([...files.keys(), ...diskOnly.map(normalizePath)]);
+
+    const app = {
+      vault: {
+        getName: () => "test-vault",
+        getAbstractFileByPath: (p: string) => files.get(normalizePath(p))?.file ?? null,
+        getFiles: () => Array.from(files.values()).map((e) => e.file),
+        adapter: { exists: async (p: string) => disk.has(normalizePath(p)) },
+        readBinary: async (f: TFile) => {
+          const entry = files.get(normalizePath(f.path));
+          if (!entry) throw new Error(`File not found: ${f.path}`);
+          return new TextEncoder().encode(entry.content).buffer;
+        },
+        read: async (f: TFile) => files.get(normalizePath(f.path))?.content ?? "",
+        cachedRead: async (f: TFile) => files.get(normalizePath(f.path))?.content ?? "",
+        modify: vi.fn(async (f: TFile, content: string) => {
+          files.set(normalizePath(f.path), { content, file: f });
+        }),
+        create: vi.fn(async (path: string, content: string) => {
+          const normalizedPath = normalizePath(path);
+          const name = normalizedPath.split("/").pop() ?? normalizedPath;
+          const file = new TFile(name, normalizedPath, { size: content.length });
+          files.set(normalizedPath, { content, file });
+          disk.add(normalizedPath);
+          return file;
+        }),
+        delete: vi.fn(async (f: TFile) => {
+          files.delete(normalizePath(f.path));
+          disk.delete(normalizePath(f.path));
+        }),
+      },
+    };
+    return { app, mdFile, files };
+  }
+
+  it("re-processes a PDF already recorded in state instead of leaving the real binary in the dummy folder", async () => {
+    const pdfContent = makePdfContent();
+    const hash = md5Buffer(new TextEncoder().encode(pdfContent).buffer);
+    const { app, mdFile, files } = makeAppWithDisk(
+      [{ name: "Testing_roles (4).pdf", content: pdfContent, folder: "Файлы" }],
+      `![[Testing_roles (4).pdf]]`
+    );
+    const localFile = files.get("Файлы/Testing_roles (4).pdf")!.file;
+
+    // Как в реальном vault: по этому пути файл уже загружали ранее.
+    const state = makeState();
+    state.processed["Файлы/Testing_roles (4).pdf"] = {
+      hash,
+      s3url: "http://old-endpoint/docs/stale.pdf",
+      processedAt: "2026-08-06T14:42:21.697Z",
+    };
+
+    const changes = await (processMdFile as any)(
+      app,
+      DEFAULT_SETTINGS,
+      makeClient(),
+      state,
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(1);
+    const newContent = app.vault.modify.mock.calls[0][1];
+    expect(newContent).toBe("![[Testing_roles (4)-2.pdf]]");
+    expect(app.vault.delete).toHaveBeenCalledWith(localFile);
+
+    // Реальный PDF больше не лежит в папке dummy, на его месте нормальный dummy.
+    const dummyEntry = files.get("Файлы/Testing_roles (4)-2.pdf");
+    expect(dummyEntry).toBeDefined();
+    expect(dummyEntry!.content.startsWith("%PDF-")).toBe(false);
+    expect(dummyEntry!.content).toContain("# vault-s3-sync:md5=");
+    expect(dummyEntry!.content).toContain(expectedPdfUrl(pdfContent));
+
+    const remainingPdfs = Array.from(files.keys()).filter((p) => p.endsWith(".pdf"));
+    expect(remainingPdfs).toEqual(["Файлы/Testing_roles (4)-2.pdf"]);
+  });
+
+  it("does not delete the local attachment when writing the note fails", async () => {
+    const pdfContent = makePdfContent();
+    const { app, mdFile, files } = makeAppWithDisk(
+      [{ name: "doc.pdf", content: pdfContent }],
+      `![[doc.pdf]]`
+    );
+    app.vault.modify.mockImplementation(async () => {
+      throw new Error("write conflict");
+    });
+
+    await expect(
+      (processMdFile as any)(app, DEFAULT_SETTINGS, makeClient(), makeState(), mdFile, makeLogger())
+    ).rejects.toThrow("write conflict");
+
+    expect(app.vault.delete).not.toHaveBeenCalled();
+    expect(files.get("Файлы/doc.pdf")).toBeDefined();
+  });
+
+  it("does not create a dummy over a PDF that exists on disk but is missing from the index", async () => {
+    const pdfContent = makePdfContent();
+    const { app, mdFile } = makeAppWithDisk(
+      [{ name: "legacy.pdf", content: pdfContent, folder: "Картинки" }],
+      `![[Картинки/legacy.pdf]]`,
+      ["Файлы/legacy.pdf"]
+    );
+
+    const changes = await (processMdFile as any)(
+      app,
+      DEFAULT_SETTINGS,
+      makeClient(),
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(1);
+    const createdPaths = app.vault.create.mock.calls.map((c: any) => normalizePath(c[0]));
+    expect(createdPaths).toEqual(["Файлы/legacy-2.pdf"]);
+    expect(app.vault.modify.mock.calls[0][1]).toBe("![[legacy-2.pdf]]");
+  });
+});
+
+describe("processMdFile S3 key canonicalization", () => {
+  it("collapses .jpg and .jpeg sources with identical content into one S3 object", async () => {
+    const content = "same-bytes";
+    const { app, mdFile } = makeAppWithFiles(
+      [
+        { name: "a.jpg", content },
+        { name: "b.jpeg", content },
+      ],
+      `![[Картинки/a.jpg]]\n![[Картинки/b.jpeg]]`
+    );
+
+    const changes = await (processMdFile as any)(
+      app,
+      DEFAULT_SETTINGS,
+      makeClient(),
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(2);
+    const newContent: string = app.vault.modify.mock.calls[0][1];
+    const urls = [...newContent.matchAll(/\(([^)]+)\)/g)].map((m) => m[1]);
+
+    expect(urls).toHaveLength(2);
+    // Один и тот же контент → один и тот же ключ объекта, независимо от
+    // исходного расширения (.jpg / .jpeg).
+    expect(new Set(urls).size).toBe(1);
+    expect(urls[0]).toBe(expectedUrl(content, ".jpg"));
+  });
+
+  it("keeps the source name when hash filenames are disabled", async () => {
+    const content = "same-bytes";
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      s3: { ...DEFAULT_SETTINGS.s3, hashFilenames: false },
+    };
+    const { app, mdFile } = makeAppWithFiles(
+      [{ name: "b.jpeg", content }],
+      `![[Картинки/b.jpeg]]`
+    );
+
+    const changes = await (processMdFile as any)(
+      app,
+      settings,
+      makeClient(),
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(1);
+    expect(app.vault.modify.mock.calls[0][1]).toContain("media/b.jpeg");
+  });
+});
+
+// ── Независимость от режима ссылок Obsidian ──────────────────────────────────
+// Настройка «Файлы и ссылки → Использовать [[wiki-ссылки]]» не должна влиять
+// на результат sync: ![[x]]/[[x]] и ![alt](x)/[alt](x) обрабатываются одинаково.
+describe("processMdFile link mode independence", () => {
+  async function syncNote(
+    noteContent: string,
+    filesData: { name: string; content: string }[]
+  ) {
+    const { app, mdFile, files } = makeAppWithFiles(filesData, noteContent);
+    const logger = makeLogger();
+    const changes = await (processMdFile as any)(
+      app,
+      DEFAULT_SETTINGS,
+      makeClient(),
+      makeState(),
+      mdFile,
+      logger
+    );
+    return {
+      changes,
+      logger,
+      files,
+      content: app.vault.modify.mock.calls[0]?.[1] as string | undefined,
+    };
+  }
+
+  it("produces the same result for wiki links and markdown links", async () => {
+    const filesData = [
+      { name: "p.png", content: "png-bytes" },
+      { name: "v.mp4", content: "mp4-bytes" },
+      { name: "d.pdf", content: makePdfContent() },
+    ];
+
+    const wiki = await syncNote(
+      "![[Картинки/p.png]]\n[[Картинки/v.mp4|видео]]\n![[Картинки/d.pdf]]",
+      filesData
+    );
+    const md = await syncNote(
+      "![p](Картинки/p.png)\n[видео](Картинки/v.mp4)\n![презентация](Картинки/d.pdf)",
+      filesData
+    );
+
+    expect(wiki.changes).toBe(3);
+    expect(md.changes).toBe(3);
+    expect(wiki.logger.error).not.toHaveBeenCalled();
+    expect(md.logger.error).not.toHaveBeenCalled();
+    // Побайтово одинаковый результат независимо от режима ссылок
+    expect(md.content).toBe(wiki.content);
+    expect(md.content).toContain("![|550](");
+    expect(md.content).toContain("[видео](");
+    expect(md.content).toContain("![[d.pdf]]");
+  });
+
+  it("resolves URL-encoded markdown link targets", async () => {
+    const content = "png-bytes";
+    const { app, mdFile } = makeAppWithFiles(
+      [{ name: "photo one.png", content }],
+      "![](Картинки/photo%20one.png)\n[](Картинки/photo%20one.png)"
+    );
+
+    const changes = await (processMdFile as any)(
+      app,
+      DEFAULT_SETTINGS,
+      makeClient(),
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(2);
+    const url = expectedUrl(content, ".png");
+    expect(app.vault.modify.mock.calls[0][1]).toBe(`![|550](${url})\n![|550](${url})`);
+  });
+
+  it("never uploads or rewrites external links, even with the setting enabled", async () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      downloadExternalImages: true,
+    };
+    const { app, mdFile } = makeAppWithFiles(
+      [{ name: "local.png", content: "png-bytes" }],
+      [
+        "![alt](https://host/image.png)",
+        "[документ](https://host/file.pdf)",
+        '<img src="https://host/pic.jpg">',
+        "![[Картинки/local.png]]",
+      ].join("\n")
+    );
+    const client = makeClient();
+
+    const changes = await (processMdFile as any)(
+      app,
+      settings,
+      client,
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(1);
+    const newContent = app.vault.modify.mock.calls[0][1] as string;
+    expect(newContent).toContain("![alt](https://host/image.png)");
+    expect(newContent).toContain("[документ](https://host/file.pdf)");
+    expect(newContent).toContain('<img src="https://host/pic.jpg">');
+    expect(newContent).toContain(`![|550](${expectedUrl("png-bytes", ".png")})`);
+  });
+
+  it("creates one dummy for markdown-style PDF refs (embed and link)", async () => {
+    const pdfContent = makePdfContent();
+    const { app, mdFile, files } = makeAppWithFiles(
+      [{ name: "doc.pdf", content: pdfContent }],
+      "![alt](Картинки/doc.pdf)\n[](Картинки/doc.pdf)"
+    );
+
+    const changes = await (processMdFile as any)(
+      app,
+      DEFAULT_SETTINGS,
+      makeClient(),
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(2);
+    expect(app.vault.modify.mock.calls[0][1]).toBe("![[doc.pdf]]\n![[doc.pdf]]");
+
+    const dummy = files.get("Файлы/doc.pdf");
+    expect(dummy).toBeDefined();
+    expect(dummy!.content).not.toContain("%PDF-");
+    expect(dummy!.content).toContain("# vault-s3-sync:md5=");
+  });
+});

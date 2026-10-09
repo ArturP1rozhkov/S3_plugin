@@ -15,6 +15,7 @@ import {
 import { ResultModal, type ResultData } from "./status";
 import {
   ATTACHMENT_EXT,
+  canonicalExt,
   fileType,
   s3Key,
   DEFAULT_FOLDER_MAP,
@@ -22,11 +23,7 @@ import {
 import { md5Buffer } from "./md5";
 import { ensurePdfDummy, isDummyPdf } from "./pdfDummy";
 import {
-  isAlreadyProcessed,
   markProcessed,
-  shouldSkipExternal,
-  recordFailed,
-  simpleHash,
 } from "../state";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -74,7 +71,7 @@ function resolveLocalRef(
 export type UploadResult =
   | { status: "ok"; url: string }
   | { status: "empty" }
-  | { status: "error" };
+  | { status: "error"; reason: string };
 
 async function uploadFile(
   app: App,
@@ -92,9 +89,12 @@ async function uploadFile(
 
     const e = ext(file.name);
     const hash = md5Buffer(buf);
-    const filename = settings.s3.hashFilenames ? `${hash}${e}` : file.name;
+    // Ключ от содержимого строим по КАНОНИЧЕСКОМУ расширению: иначе
+    // a.jpg и b.jpeg с одинаковыми байтами дают два объекта в бакете.
+    const keyExt = canonicalExt(e);
+    const filename = settings.s3.hashFilenames ? `${hash}${keyExt}` : file.name;
     const folderMap = settings.s3.folderMap ?? DEFAULT_FOLDER_MAP;
-    const key = s3Key(folderMap, filename, e);
+    const key = s3Key(folderMap, filename, keyExt);
 
     // Проверяем, нет ли уже в S3 идентичного объекта (по ключу/ETag/размеру),
     // чтобы избежать повторной загрузки того же файла.
@@ -129,10 +129,16 @@ async function uploadFile(
     return { status: "ok", url: publicUrl(settings.s3, key) };
   } catch (err) {
     console.error(`[S3 Sync] Upload failed: ${file.name}`, err);
-    return { status: "error" };
+    return { status: "error", reason: err instanceof Error ? err.message : String(err) };
   }
 }
 
+/**
+ * Скачивание внешних ссылок.
+ * Сейчас НЕ вызывается: по политике проекта внешние интернет-ссылки только
+ * рендерятся и никогда не скачиваются и не попадают в бакет. Функция оставлена
+ * как заготовка для отдельного инструмента импорта внешних ссылок.
+ */
 async function downloadExternal(
   url: string,
   timeoutMs: number
@@ -186,6 +192,11 @@ export async function processMdFile(
   const noteRelPath = mdFile.path;
   let changes = 0;
 
+  // Локальные вложения удаляем ТОЛЬКО после того, как заметка записана.
+  // Иначе любая ошибка/исключение после удаления оставляли заметку со
+  // ссылками на уже исчезнувшие файлы.
+  const deletions: TFile[] = [];
+
   for (const parsed of parseAllAttachmentRefs(content, ATTACHMENT_EXT)) {
     const { fullMatch, ref, altText, kind } = parsed;
 
@@ -193,50 +204,28 @@ export async function processMdFile(
 
     if (isAlreadyS3Ref(ref, settings.s3.publicEndpoint, settings.s3.endpoint, settings.s3.bucket)) continue;
 
+    // ── Внешние интернет-ссылки ───────────────────────────────────────────────
+    // Политика: внешние ссылки только рендерятся. Они не скачиваются, не
+    // загружаются в бакет и не переписываются. Основной отсев — в linkParser
+    // (isAttachmentCandidate), здесь защита от регрессий на уровне пайплайна.
+    if (isExternalRef(ref)) continue;
+
     let url: string | null = null;
     let localFile: TFile | null = null;
     let uploadedExt  = fileExt;
     let uploadedName = refFilename(ref);
     let fileHash: string | null = null;
 
-    // ── External URL ─────────────────────────────────────────────────────────
-    if (isExternalRef(ref)) {
-      if (!settings.downloadExternalImages) continue;
-      if (shouldSkipExternal(state, ref, settings.maxExternalAttempts)) continue;
-
-      const downloaded = await downloadExternal(ref, (settings.externalImageTimeoutSec ?? 10) * 1000);
-      if (!downloaded) { recordFailed(state, ref); logger.warn(`External download failed: ${ref}`); continue; }
-
-      fileHash = md5Buffer(downloaded.buf);
-      uploadedExt  = downloaded.ext;
-      uploadedName = `${fileHash}${uploadedExt}`;
-      const key    = s3Key(settings.s3.folderMap ?? DEFAULT_FOLDER_MAP, uploadedName, uploadedExt);
-
-      try {
-        const existing = await headObject(client, settings.s3, key);
-        if (
-          existing &&
-          existing.ContentLength === downloaded.buf.byteLength &&
-          (existing.ETag ?? "").replace(/^"|"$/g, "") === fileHash
-        ) {
-          url = publicUrl(settings.s3, key);
-        } else {
-          await uploadBuffer(client, settings.s3, key, new Uint8Array(downloaded.buf), "image/jpeg", {
-            "source-vault": app.vault.getName(),
-            "uploaded-by":  "vault-s3-sync",
-            "original-url": encodeURIComponent(ref),
-          });
-          url = publicUrl(settings.s3, key);
-        }
-        state.processed[`ext:${simpleHash(ref)}`] = { hash: fileHash, s3url: url, processedAt: new Date().toISOString() };
-      } catch (err) {
-        recordFailed(state, ref); logger.error(`External upload failed: ${ref}`); continue;
-      }
-
     // ── Local file ───────────────────────────────────────────────────────────
-    } else {
+    {
       localFile = resolveLocalRef(app, ref, settings.attachmentFolders);
-      if (!localFile) continue;
+      if (!localFile) {
+        // Ссылка в заметке есть, но файла нет ни по указанному пути, ни в
+        // attachment-папках, ни в индексе vault. Раньше это пропускалось молча:
+        // sync сообщал «0 replacements, 0 errors», хотя ссылка битая.
+        logger.warn(`Attachment not found in vault: "${ref}" in ${noteRelPath}`);
+        continue;
+      }
 
       if (uploadedExt === ".pdf") {
         if (isDummyPdf(await app.vault.read(localFile), localFile.stat.size)) {
@@ -247,8 +236,15 @@ export async function processMdFile(
 
       const fileBuf  = await app.vault.readBinary(localFile);
       fileHash = md5Buffer(fileBuf);
-      if (isAlreadyProcessed(state, localFile.path, fileHash)) continue;
 
+      // ВАЖНО: здесь НЕЛЬЗЯ выходить по записи в state.
+      // State (path+hash) означает только «файл уже загружали», но не «ссылка в
+      // заметке уже переписана». Старый skip по state оставлял заметку со
+      // ссылкой ![[real.pdf]] на настоящий PDF, лежащий в pdfDummyFolder —
+      // снаружи это выглядело как «в dummy записан сырой бинарный PDF», и
+      // состояние больше никогда не исправлялось (файл защищён от cleanup,
+      // т.к. на него есть ссылка). Дедупликация загрузки выполняется в
+      // uploadFile через HeadObject/ETag, поэтому повторный вызов безопасен.
       const uploadResult = await uploadFile(app, settings, client, localFile, noteRelPath);
 
       if (uploadResult.status === "empty") {
@@ -259,7 +255,7 @@ export async function processMdFile(
       }
 
       if (uploadResult.status !== "ok") {
-        logger.error(`Upload failed: ${localFile.name}`);
+        logger.error(`Upload failed: ${localFile.name} — ${uploadResult.reason}`);
         continue;
       }
 
@@ -278,8 +274,14 @@ export async function processMdFile(
       // HTML-теги: заменяем только src="..." внутри тега
       newText = fullMatch.replace(ref, url);
 
-    } else if (uploadedExt === ".pdf" && (kind === "wiki-embed" || kind === "wiki-link") && fileHash) {
-      // PDF wiki-links/embeds: унифицированный pipeline — всегда wiki-embed на локальный dummy.
+    } else if (
+      uploadedExt === ".pdf" &&
+      (kind === "wiki-embed" || kind === "wiki-link" || kind === "md-embed" || kind === "md-link") &&
+      fileHash
+    ) {
+      // PDF: любая форма ссылки (wiki/markdown, embed/link) → wiki-embed на
+      // локальный dummy. Иначе markdown-режим дал бы ссылку на удалённый
+      // локальный файл вместо dummy.
       try {
         const dummyName = await ensurePdfDummy(app, settings, uploadedName, fileHash, url);
         newText = `![[${dummyName}]]`;
@@ -304,20 +306,26 @@ export async function processMdFile(
     content = content.replace(fullMatch, () => newText);
     changes++;
 
-    // Удаляем локальный файл после успешной загрузки (и после создания dummy).
+    // Локальный файл удаляем после записи заметки (см. deletions выше).
     if (localFile) {
-      try {
-        await app.vault.delete(localFile);
-        logger.info(`Uploaded & removed: ${localFile.name} → ${url}`);
-      } catch (err) {
-        logger.warn(`Could not delete local file: ${localFile.name}`);
-      }
+      deletions.push(localFile);
+      logger.info(`Uploaded: ${localFile.name} → ${url}`);
     }
   }
 
   if (changes > 0) {
     await app.vault.modify(mdFile, content);
     logger.info(`Updated note: ${mdFile.name} (${changes} replacements)`);
+  }
+
+  // Удаляем исходники только теперь, когда заметка уже переписана.
+  for (const file of deletions) {
+    try {
+      await app.vault.delete(file);
+      logger.info(`Removed local file: ${file.name}`);
+    } catch (err) {
+      logger.warn(`Could not delete local file: ${file.name}`);
+    }
   }
 
   return changes;

@@ -3,28 +3,36 @@ import { describe, expect, it, vi } from "vitest";
 import { cmdCleanup } from "../../src/engine/cleanup";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 
-vi.mock("obsidian", () => ({
+vi.mock("obsidian", () => {
+  // Универсальный DOM-stub: вложенные createEl/createDiv возвращают такой же stub.
+  // Кнопка "Move to trash" в askConfirmation «нажимается» сразу — иначе реальная
+  // ветка cmdCleanup (dryRun = false) ждала бы клика вечно.
+  function makeStubEl(opts?: { text?: string }): any {
+    const el: any = {
+      style: {},
+      setText: vi.fn(() => el),
+      addClass: vi.fn(() => el),
+      removeClass: vi.fn(() => el),
+      empty: vi.fn(() => el),
+      setAttr: vi.fn(() => el),
+      appendChild: vi.fn(() => el),
+      addEventListener: (ev: string, cb: () => void) => {
+        if (ev === "click" && opts?.text === "Move to trash") cb();
+      },
+      createEl: vi.fn((_tag: string, o?: any) => makeStubEl(o)),
+      createDiv: vi.fn((o?: any) => makeStubEl(o)),
+    };
+    return el;
+  }
+
+  return {
   App: class {},
   Modal: class {
     contentEl: any;
     titleEl: any;
     constructor(public app: any) {
-      this.contentEl = {
-        empty: vi.fn(),
-        addClass: vi.fn(),
-        setText: vi.fn(),
-        createEl: vi.fn(() => ({
-          setText: vi.fn(),
-          addEventListener: vi.fn(),
-        })),
-        createDiv: vi.fn(() => ({
-          createEl: vi.fn(() => ({
-            setText: vi.fn(),
-            addEventListener: vi.fn(),
-          })),
-        })),
-      };
-      this.titleEl = { setText: vi.fn() };
+      this.contentEl = makeStubEl();
+      this.titleEl = makeStubEl();
     }
     open() {}
     close() {}
@@ -56,7 +64,8 @@ vi.mock("obsidian", () => ({
     children: any[] = [];
   },
   normalizePath: (p: string) => p.replace(/\\/g, "/"),
-}));
+  };
+});
 
 function makeCleanupApp(filesData: { name: string; content: string; folder?: string }[]) {
   const allFiles: TFile[] = [];
@@ -73,7 +82,7 @@ function makeCleanupApp(filesData: { name: string; content: string; folder?: str
 
   for (const f of filesData) {
     const folder = f.folder ?? "Файлы";
-    ensureFolder(folder);
+    if (folder) ensureFolder(folder);
     const path = folder ? normalizePath(`${folder}/${f.name}`) : normalizePath(f.name);
     const file = new (TFile as any)(f.name, path, { size: f.content.length });
     allFiles.push(file);
@@ -102,6 +111,26 @@ function makeCleanupApp(filesData: { name: string; content: string; folder?: str
     }
   }
 
+  const indexOfPath = (p: string) => {
+    const np = normalizePath(p);
+    return allFiles.findIndex((f) => normalizePath(f.path) === np);
+  };
+
+  /** Общая реализация перемещения: обновляет и «диск» (contents), и «индекс» (allFiles). */
+  const movePaths = (from: string, to: string) => {
+    const npFrom = normalizePath(from);
+    const npTo = normalizePath(to);
+    const content = contents.get(npFrom) ?? "";
+    contents.delete(npFrom);
+    const i = indexOfPath(npFrom);
+    if (i >= 0) {
+      allFiles.splice(i, 1);
+      const name = npTo.split("/").pop() ?? npTo;
+      allFiles.push(new (TFile as any)(name, npTo, { size: content.length }));
+    }
+    contents.set(npTo, content);
+  };
+
   const app = {
     vault: {
       getAbstractFileByPath: (p: string) => {
@@ -112,8 +141,25 @@ function makeCleanupApp(filesData: { name: string; content: string; folder?: str
       getMarkdownFiles: () => allFiles.filter((f) => f.name.endsWith(".md")),
       read: async (f: TFile) => contents.get(normalizePath(f.path)) ?? "",
       cachedRead: async (f: TFile) => contents.get(normalizePath(f.path)) ?? "",
-      rename: vi.fn(),
-      adapter: { mkdir: vi.fn() },
+      rename: vi.fn(async (f: any, dest: string) => { movePaths(f.path, dest); }),
+      delete: vi.fn(async (f: any) => {
+        contents.delete(normalizePath(f.path));
+        const i = indexOfPath(f.path);
+        if (i >= 0) allFiles.splice(i, 1);
+      }),
+      adapter: {
+        // Obsidian бросает "Folder already exists." БЕЗ code === EEXIST —
+        // именно это раньше роняло cleanup до перемещения файлов.
+        mkdir: vi.fn(async () => { throw new Error("Folder already exists."); }),
+        exists: vi.fn(async (p: string) => folders.has(normalizePath(p)) || contents.has(normalizePath(p))),
+        rename: vi.fn(async (from: string, to: string) => { movePaths(from, to); }),
+        readBinary: vi.fn(async (p: string) =>
+          new TextEncoder().encode(contents.get(normalizePath(p)) ?? "").buffer
+        ),
+        writeBinary: vi.fn(async (p: string, data: ArrayBuffer) => {
+          contents.set(normalizePath(p), new TextDecoder().decode(data));
+        }),
+      },
     },
     metadataCache: {
       getFileCache: (f: TFile) => ({
@@ -123,7 +169,7 @@ function makeCleanupApp(filesData: { name: string; content: string; folder?: str
     },
   };
 
-  return { app, allFiles };
+  return { app, allFiles, contents, folders };
 }
 
 describe("cmdCleanup dummy PDF protection", () => {
@@ -188,5 +234,89 @@ describe("cmdCleanup dummy PDF protection", () => {
 
     const result = await (cmdCleanup as any)(app, settings, { processed: {}, failedExternal: {} }, true);
     expect(result.orphans).toBe(1);
+  });
+});
+
+describe("cmdCleanup real move to trash", () => {
+  const state = { processed: {}, failedExternal: {} };
+
+  it("moves orphans even when adapter.mkdir throws 'Folder already exists'", async () => {
+    const { app, contents } = makeCleanupApp([
+      { name: "note.md", content: "в заметке нет ссылок на вложения", folder: "" },
+      { name: "cold.jpg", content: "img-bytes", folder: "Файлы" },
+    ]);
+
+    // .trash ещё нет в индексе → ensureFolderExists вызовет mkdir, который упадёт
+    const res = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, state, false);
+
+    expect(app.vault.adapter.mkdir).toHaveBeenCalled();
+    expect(res.moved).toBe(1);
+    expect(contents.has(".trash/cold.jpg")).toBe(true);
+    expect(contents.has("Файлы/cold.jpg")).toBe(false);
+  });
+
+  it("falls back to adapter.rename when vault.rename fails", async () => {
+    const { app, contents } = makeCleanupApp([
+      { name: "note.md", content: "в заметке нет ссылок на вложения", folder: "" },
+      { name: "cold.jpg", content: "img-bytes", folder: "Файлы" },
+    ]);
+    app.vault.rename.mockRejectedValue(new Error("Folder does not exist"));
+
+    const res = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, state, false);
+
+    expect(res.moved).toBe(1);
+    expect(app.vault.adapter.rename).toHaveBeenCalledWith("Файлы/cold.jpg", ".trash/cold.jpg");
+    expect(contents.get(".trash/cold.jpg")).toBe("img-bytes");
+    expect(contents.has("Файлы/cold.jpg")).toBe(false);
+  });
+
+  it("does not overwrite a file that already sits in trash", async () => {
+    const { app, contents } = makeCleanupApp([
+      { name: "note.md", content: "в заметке нет ссылок на вложения", folder: "" },
+      { name: "cold.jpg", content: "img-bytes", folder: "Файлы" },
+      { name: "cold.jpg", content: "old-trash-copy", folder: ".trash" },
+    ]);
+
+    const res = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, state, false);
+
+    expect(res.moved).toBe(1);
+    expect(app.vault.rename).toHaveBeenCalledWith(expect.anything(), ".trash/cold 2.jpg");
+    expect(contents.get(".trash/cold.jpg")).toBe("old-trash-copy");
+    expect(contents.get(".trash/cold 2.jpg")).toBe("img-bytes");
+  });
+
+  it("reports files it could not move instead of failing silently", async () => {
+    const { app, contents } = makeCleanupApp([
+      { name: "note.md", content: "в заметке нет ссылок на вложения", folder: "" },
+      { name: "cold.jpg", content: "img-bytes", folder: "Файлы" },
+    ]);
+    app.vault.rename.mockRejectedValue(new Error("nope"));
+    app.vault.adapter.rename.mockRejectedValue(new Error("nope"));
+    app.vault.adapter.writeBinary.mockRejectedValue(new Error("nope"));
+
+    const res = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, state, false);
+
+    expect(res.moved).toBe(0);
+    expect(contents.has("Файлы/cold.jpg")).toBe(true); // файл не потерян
+  });
+});
+
+describe("cmdCleanup URL-encoded references", () => {
+  it("protects a file referenced only by an encoded markdown link", async () => {
+    const { app } = makeCleanupApp([
+      { name: "note.md", content: "![](Файлы/cold%20one.jpg)", folder: "" },
+      { name: "cold one.jpg", content: "img-bytes", folder: "Файлы" },
+    ]);
+
+    const res = await (cmdCleanup as any)(
+      app,
+      DEFAULT_SETTINGS,
+      { processed: {}, failedExternal: {} },
+      true
+    );
+
+    // Ссылка в заметке URL-кодированная: без декодирования этот файл
+    // считался бы сиротой и уехал бы в .trash при живой ссылке.
+    expect(res.orphans).toBe(0);
   });
 });

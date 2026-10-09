@@ -92,7 +92,13 @@ async function collectReferencedFilenames(
 
     // 2. Из текста — HTML-теги и markdown-ссылки
     //    (metadataCache не покрывает <img src=...>, <video>, <audio>)
-    const content = await app.vault.cachedRead(md);
+    let content = "";
+    try {
+      content = await app.vault.cachedRead(md);
+    } catch (err) {
+      console.warn(`[Cleanup] skip unreadable note ${md.path}: ${err}`);
+      continue;
+    }
     const allRefs = parseAllRefs(content);
 
     for (const { ref, kind } of allRefs) {
@@ -111,6 +117,96 @@ async function collectReferencedFilenames(
   }
 
   return referenced;
+}
+
+// ── Перемещение в trash ───────────────────────────────────────────────────────
+
+/** Существует ли путь: спрашиваем диск, а если adapter.exists недоступен — индекс vault. */
+async function pathExists(app: App, path: string): Promise<boolean> {
+  try {
+    if (typeof app.vault.adapter.exists === "function") {
+      return await app.vault.adapter.exists(path);
+    }
+  } catch { /* ignore — падаем в индекс */ }
+  return app.vault.getAbstractFileByPath(path) !== null;
+}
+
+/**
+ * Гарантирует, что папка назначения есть. Никогда не бросает исключение:
+ * Obsidian кидает "Folder already exists." БЕЗ code === EEXIST, и раньше это
+ * исключение пролетало наружу — команда cleanup падала целиком, до цикла
+ * перемещения, поэтому файлы оставались на месте, а модалка не появлялась.
+ */
+async function ensureFolderExists(app: App, folder: string): Promise<void> {
+  try {
+    if (await pathExists(app, folder)) return;
+  } catch { /* ignore */ }
+  try {
+    await app.vault.adapter.mkdir(folder);
+  } catch (err) {
+    console.warn(`[Cleanup] mkdir "${folder}" failed, continuing: ${err}`);
+  }
+}
+
+/** Путь в trash с уникальным именем — то, что уже лежит в trash, не перезаписываем. */
+async function uniqueTrashPath(app: App, trashFolder: string, name: string): Promise<string> {
+  const dot  = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext  = dot > 0 ? name.slice(dot) : "";
+
+  let candidate = normalizePath(`${trashFolder}/${name}`);
+  let counter = 2;
+  while (await pathExists(app, candidate)) {
+    candidate = normalizePath(`${trashFolder}/${base} ${counter}${ext}`);
+    counter++;
+  }
+  return candidate;
+}
+
+/**
+ * Убирает файл из vault в trash-папку, проверяя результат.
+ *   1) vault.rename     — штатный путь Obsidian (обновляет ссылки);
+ *   2) adapter.rename   — работает и для папок вне индекса (например .trash);
+ *   3) read+write+delete — последний резерв.
+ * Возвращает ok:false с причиной, если файл реально остался на месте.
+ */
+async function moveToTrash(
+  app: App,
+  file: TFile,
+  trashFolder: string
+): Promise<{ ok: boolean; reason?: string }> {
+  const dest = await uniqueTrashPath(app, trashFolder, file.name);
+  const errors: string[] = [];
+
+  const gone = async (): Promise<boolean> => !(await pathExists(app, file.path));
+
+  try {
+    await app.vault.rename(file, dest);
+    if (await gone()) return { ok: true };
+    errors.push("vault.rename: файл остался на месте");
+  } catch (err) {
+    errors.push(`vault.rename: ${err}`);
+  }
+
+  try {
+    await app.vault.adapter.rename(file.path, dest);
+    if (await gone()) return { ok: true };
+    errors.push("adapter.rename: файл остался на месте");
+  } catch (err) {
+    errors.push(`adapter.rename: ${err}`);
+  }
+
+  try {
+    const data = await app.vault.adapter.readBinary(file.path);
+    await app.vault.adapter.writeBinary(dest, data);
+    await app.vault.delete(file);
+    if (await gone()) return { ok: true };
+    errors.push("copy+delete: файл остался на месте");
+  } catch (err) {
+    errors.push(`copy+delete: ${err}`);
+  }
+
+  return { ok: false, reason: errors.join("; ") };
 }
 
 // ── cmdCleanup ────────────────────────────────────────────────────────────────
@@ -204,35 +300,30 @@ export async function cmdCleanup(
   // settings.trashFolder берётся напрямую из VaultS3Settings (не из settings.options)
   const trashFolder = settings.trashFolder;
 
-  // Убедимся, что целевая папка существует (Obsidian .trash по умолчанию может отсутствовать,
-  // особенно если ни один файл ещё не удалялся через системный UI).
-  try {
-    await app.vault.adapter.mkdir(trashFolder);
-  } catch (err) {
-    // Ignore if folder already exists.
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
-      throw err;
-    }
-  }
+  // Папка назначения: если она уже есть — mkdir может бросить исключение,
+  // поэтому ensureFolderExists глотает ошибку и cleanup продолжается.
+  await ensureFolderExists(app, trashFolder);
 
   let moved = 0;
+  const failed: { path: string; reason: string }[] = [];
 
   for (const f of orphans) {
-    try {
-      const dest = normalizePath(`${trashFolder}/${f.name}`);
-      await app.vault.rename(f, dest);
+    const res = await moveToTrash(app, f, trashFolder);
+    if (res.ok) {
       log.info(`  Orphan → trash: ${f.name}`);
       moved++;
-    } catch (err) {
-      log.warn(`  Could not move ${f.name}: ${err}`);
+    } else {
+      const reason = res.reason ?? "unknown error";
+      log.warn(`  Could not move ${f.name}: ${reason}`);
+      failed.push({ path: f.path, reason });
     }
   }
 
-  log.info(`CLEANUP local complete: ${moved} moved to trash`);
+  log.info(`CLEANUP local complete: ${moved} moved to trash, ${failed.length} failed`);
 
   const data: ResultData = {
     title: "Cleanup — Completed",
-    icon: "🗑️",
+    icon: failed.length > 0 ? "⚠️" : "🗑️",
     subtitle: `${moved} of ${orphans.length} orphan file(s) moved to trash`,
     sections: [
       {
@@ -241,19 +332,32 @@ export async function cmdCleanup(
           "🗑️ Orphan files found": String(orphans.length),
           "📦 Total size": `${(orphans.reduce((s, f) => s + f.stat.size, 0) / 1024 / 1024).toFixed(2)} MB`,
           "✅ Moved to trash": String(moved),
+          ...(failed.length > 0 ? { "❌ Failed to move": String(failed.length) } : {}),
         },
+        error: failed.length > 0,
       },
     ],
-    lists: orphanItems.length > 0
-      ? [{
-          title: "Moved files",
-          icon: "🗑️",
-          items: orphanItems,
-          initiallyExpanded: orphanItems.length <= 15,
-          maxInitialItems: 15,
-        }]
-      : undefined,
   };
+
+  const lists: ResultData["lists"] = [];
+  if (orphanItems.length > 0) {
+    lists.push({
+      title: "Moved files",
+      icon: "🗑️",
+      items: orphanItems,
+      initiallyExpanded: orphanItems.length <= 15,
+      maxInitialItems: 15,
+    });
+  }
+  if (failed.length > 0) {
+    lists.push({
+      title: "Files that could not be moved",
+      icon: "❌",
+      items: failed.map((f) => ({ label: f.path, value: f.reason })),
+      initiallyExpanded: true,
+    });
+  }
+  if (lists.length > 0) data.lists = lists;
 
   new ResultModal(app, data).open();
   return { orphans: orphans.length, moved };

@@ -41,8 +41,18 @@ export default class VaultS3Plugin extends Plugin {
       id: "s3-sync",
       name: "Sync: upload attachments to S3",
       callback: async () => {
-        await cmdSync(this.app, this.settings, this.syncState);
-        await this.saveData({ ...this.settings, syncState: this.syncState });
+        try {
+          await cmdSync(this.app, this.settings, this.syncState);
+          await this.saveData({ ...this.settings, syncState: this.syncState });
+        } catch (err) {
+          console.error("[S3 Sync] Sync failed:", err);
+          new ResultModal(this.app, {
+            title: "S3 Sync — Failed",
+            icon: "❌",
+            subtitle: "the run stopped before finishing",
+            sections: [{ title: "", rows: { "⚠️ Error": String(err) }, error: true }],
+          }).open();
+        }
       },
     });
 
@@ -78,7 +88,19 @@ export default class VaultS3Plugin extends Plugin {
       id: "s3-cleanup",
       name: "Cleanup: move local orphan files to trash",
       callback: async () => {
-        await cmdCleanup(this.app, this.settings, this.syncState);
+        try {
+          await cmdCleanup(this.app, this.settings, this.syncState);
+        } catch (err) {
+          // Раньше исключение (например mkdir по существующей папке) уходило в
+          // необработанный reject, и выглядело это как «плагин ничего не сделал».
+          console.error("[S3 Sync] Cleanup failed:", err);
+          new ResultModal(this.app, {
+            title: "Cleanup — Failed",
+            icon: "❌",
+            subtitle: "orphan files were not moved",
+            sections: [{ title: "", rows: { "⚠️ Error": String(err) }, error: true }],
+          }).open();
+        }
       },
     });
 
@@ -86,7 +108,17 @@ export default class VaultS3Plugin extends Plugin {
       id: "s3-cleanup-dry-run",
       name: "Cleanup (dry run): preview orphan files without moving",
       callback: async () => {
-        await cmdCleanup(this.app, this.settings, this.syncState, true);
+        try {
+          await cmdCleanup(this.app, this.settings, this.syncState, true);
+        } catch (err) {
+          console.error("[S3 Sync] Cleanup dry run failed:", err);
+          new ResultModal(this.app, {
+            title: "Cleanup (dry run) — Failed",
+            icon: "❌",
+            subtitle: "the scan stopped",
+            sections: [{ title: "", rows: { "⚠️ Error": String(err) }, error: true }],
+          }).open();
+        }
       },
     });
 

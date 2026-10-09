@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, TFolder } from "obsidian";
 import type VaultS3Plugin from "./main";
 
 export interface S3Config {
@@ -133,9 +133,40 @@ export class VaultS3SettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
-    new Setting(containerEl).setName("PDF dummy folder").setDesc("Folder where dummy .pdf files are kept (for PDF++ plugin)")
-      .addText(t => t.setValue(this.plugin.settings.pdfDummyFolder)
-        .onChange(async v => { this.plugin.settings.pdfDummyFolder = v.trim(); await this.plugin.saveSettings(); }));
+    // Папка для dummy PDF выбирается из списка папок vault (как в системных
+    // настройках Obsidian). Это отдельная настройка, потому что системная
+    // «папка вложений» менять не нужно: dummy лучше держать в своей папке,
+    // иначе имена настоящих PDF и dummy конфликтуют (появляются суффиксы -2).
+    const currentDummyFolder = this.plugin.settings.pdfDummyFolder;
+    const folderPaths = this.app.vault
+      .getAllLoadedFiles()
+      .filter((f): f is TFolder => f instanceof TFolder && f.path !== "/" && f.path !== "")
+      .map((f) => f.path)
+      .sort((a, b) => a.localeCompare(b));
+    if (currentDummyFolder && !folderPaths.includes(currentDummyFolder)) {
+      // Папки может ещё не быть в vault — не теряем текущее значение.
+      folderPaths.unshift(currentDummyFolder);
+    }
+
+    new Setting(containerEl)
+      .setName("PDF dummy folder")
+      .setDesc(
+        "Folder where dummy .pdf files are kept (for the PDF++ plugin). " +
+        "Pick a folder that is NOT your attachment folder — create it in Obsidian first."
+      )
+      .addDropdown((d) => {
+        for (const p of folderPaths) d.addOption(p, p);
+        if (currentDummyFolder && folderPaths.includes(currentDummyFolder)) {
+          d.setValue(currentDummyFolder);
+        } else if (folderPaths.length > 0) {
+          d.setValue(folderPaths[0]);
+          this.plugin.settings.pdfDummyFolder = folderPaths[0];
+        }
+        d.onChange(async (v) => {
+          this.plugin.settings.pdfDummyFolder = v;
+          await this.plugin.saveSettings();
+        });
+      });
 
     new Setting(containerEl).setName("Ignore folders").setDesc("One folder per line")
       .addTextArea(t => t.setValue(this.plugin.settings.ignoreFolders.join("\n"))
@@ -155,9 +186,12 @@ export class VaultS3SettingTab extends PluginSettingTab {
       .addToggle(t => t.setValue(this.plugin.settings.s3.hashFilenames)
         .onChange(async v => { this.plugin.settings.s3.hashFilenames = v; await this.plugin.saveSettings(); }));
 
-    new Setting(containerEl).setName("Download external images").setDesc("Re-upload external images to S3 during sync")
-      .addToggle(t => t.setValue(this.plugin.settings.downloadExternalImages)
-        .onChange(async v => { this.plugin.settings.downloadExternalImages = v; await this.plugin.saveSettings(); }));
+    // Политика проекта: внешние интернет-ссылки только рендерятся. Тумблер
+    // оставлен видимым (чтобы не выглядело как пропавшая настройка), но
+    // заблокирован — скачивание внешних ссылок вынесено в отдельную задачу.
+    new Setting(containerEl).setName("Download external images")
+      .setDesc("Locked: external web links are never downloaded or uploaded to S3, they are only rendered")
+      .addToggle(t => t.setValue(false).setDisabled(true));
 
     new Setting(containerEl).setName("Trash folder").setDesc(`Local orphan files are moved here during cleanup (default: ${DEFAULT_SETTINGS.trashFolder})`)
       .addText(t => t.setValue(this.plugin.settings.trashFolder)

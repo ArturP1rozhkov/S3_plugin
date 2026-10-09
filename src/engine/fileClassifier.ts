@@ -11,6 +11,23 @@ export const ATTACHMENT_EXT = new Set([
 
 export type FileType = "image" | "audio" | "video" | "pdf" | "doc" | "archive" | "other";
 
+/**
+ * Расширения-синонимы, обозначающие один и тот же контейнер.
+ * Нужны для ключа объекта в S3: без нормализации один и тот же контент
+ * уезжает в бакет дважды (`…<md5>.jpg` и `…<md5>.jpeg`), и дедупликация
+ * по содержимому перестаёт работать.
+ */
+const EXT_ALIAS: Record<string, string> = {
+  ".jpeg": ".jpg",
+  ".jpe":  ".jpg",
+};
+
+/** Каноническое расширение для ключа объекта (для ключей от MD5). */
+export function canonicalExt(ext: string): string {
+  const e = ext.toLowerCase();
+  return EXT_ALIAS[e] ?? e;
+}
+
 export function fileType(ext: string): FileType {
   const e = ext.toLowerCase();
   if (IMAGE_EXT.has(e))   return "image";
