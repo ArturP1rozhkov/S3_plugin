@@ -138,13 +138,17 @@ export class VaultS3SettingTab extends PluginSettingTab {
     // «папка вложений» менять не нужно: dummy лучше держать в своей папке,
     // иначе имена настоящих PDF и dummy конфликтуют (появляются суффиксы -2).
     const currentDummyFolder = this.plugin.settings.pdfDummyFolder;
-    const folderPaths = this.app.vault
+    const loadedFolders = this.app.vault
       .getAllLoadedFiles()
       .filter((f): f is TFolder => f instanceof TFolder && f.path !== "/" && f.path !== "")
       .map((f) => f.path)
       .sort((a, b) => a.localeCompare(b));
-    if (currentDummyFolder && !folderPaths.includes(currentDummyFolder)) {
-      // Папки может ещё не быть в vault — не теряем текущее значение.
+    const existingFolders = new Set(loadedFolders);
+    const folderPaths = [...loadedFolders];
+    const currentMissing = !!currentDummyFolder && !existingFolders.has(currentDummyFolder);
+    if (currentMissing) {
+      // Папки в vault уже нет (переименовали/удалили) — не теряем значение,
+      // но помечаем его, чтобы это было видно.
       folderPaths.unshift(currentDummyFolder);
     }
 
@@ -152,10 +156,12 @@ export class VaultS3SettingTab extends PluginSettingTab {
       .setName("PDF dummy folder")
       .setDesc(
         "Folder where dummy .pdf files are kept (for the PDF++ plugin). " +
-        "Pick a folder that is NOT your attachment folder — create it in Obsidian first."
+        "Pick a folder that is NOT your attachment folder — the plugin creates it if it does not exist yet."
       )
       .addDropdown((d) => {
-        for (const p of folderPaths) d.addOption(p, p);
+        for (const p of folderPaths) {
+          d.addOption(p, p === currentDummyFolder && currentMissing ? `⚠ ${p} (not found in vault)` : p);
+        }
         if (currentDummyFolder && folderPaths.includes(currentDummyFolder)) {
           d.setValue(currentDummyFolder);
         } else if (folderPaths.length > 0) {

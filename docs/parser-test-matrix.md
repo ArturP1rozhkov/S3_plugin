@@ -27,7 +27,7 @@
 | `![alt](img.jpg)` | `md-embed` | `img.jpg` | `img.jpg` | `` | `` | yes | yes | image embed `![|W](url)` |
 | `[doc](file.pdf)` | `md-link` | `file.pdf` | `file.pdf` | `` | `` | yes | yes | pdf dummy (а для остальных типов — markdown link) |
 | `[img](img.jpg)` | `md-link` | `img.jpg` | `img.jpg` | `` | `` | yes | yes | image embed `![|W](url)` (принудительный `!`) |
-| `[clip](clip.mp4)` | `md-link` | `clip.mp4` | `clip.mp4` | `` | `` | yes | yes | markdown link (как `[[clip.mp4]]`) |
+| `[clip](clip.mp4)` | `md-link` | `clip.mp4` | `clip.mp4` | `` | `` | yes | yes | `<video>`-плеер (как `![[clip.mp4]]`) |
 | `![alt](img.jpg?ver=2)` | `md-embed` | `img.jpg` | `img.jpg` | `ver=2` | `` | yes | yes | image embed `![|W](url)` |
 | `[doc](file.pdf#page=2)` | `md-link` | `file.pdf` | `file.pdf` | `` | `page=2` | yes | yes | pdf dummy (anchor теряется — dummy локальный) |
 | `![alt](Folder/photo%20one.jpg)` | `md-embed` | `Folder/photo one.jpg` | `photo one.jpg` | `` | `` | yes | yes | image embed `![|W](url)` (путь декодируется) |
@@ -72,6 +72,6 @@
 5. Dummy PDF не должен повторно загружаться.
 6. Чистые anchors и note-links без attachment extension не должны участвовать в attachment pipeline.
 7. Для внешних S3 изображений плагин никогда не должен генерировать `![[https://...]]`; канонический формат — markdown image `![|width](https://...)`.
-8. Результат sync не зависит от режима ссылок Obsidian: `![[x]]`/`[[x]]` и `![alt](x)`/`[alt](x)` дают одинаковый output. Наличие `!` влияет только на выбор «embed vs link» для не-картинок.
+8. Результат sync не зависит от режима ссылок Obsidian и от способа вставки: `![[x]]`/`[[x]]` и `![alt](x)`/`[alt](x)` дают одинаковый output. Картинки, видео и аудио всегда приводятся к рендерящейся форме (`![|W]`, `<video>`, `<audio>`), для документов/архивов `!` определяет embed или ссылку.
 9. Внешние `http(s)`-ссылки никогда не участвуют в pipeline: не скачиваются, не загружаются в бакет и не переписываются.
 10. Пути в markdown-ссылках декодируются (`%20` → пробел) до поиска файла в vault — и в `sync`, и в защите от orphan-детекта.

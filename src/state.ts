@@ -11,13 +11,35 @@ export interface FailedExternalEntry {
   lastAttempt: string;
 }
 
+/**
+ * Локальный файл, который не удалось удалить сразу после успешной загрузки:
+ * Obsidian ещё держит его (открытый плеер/просмотрщик). Удаление повторяется
+ * при следующем запуске sync, когда файл уже отпущен.
+ */
+export interface PendingDeletion {
+  path: string;
+  size: number;
+  mtime: number;
+}
+
 export interface SyncState {
   processed: Record<string, ProcessedEntry>;   // key = vault-relative path
   failedExternal: Record<string, FailedExternalEntry>; // key = md5(url)
+  pendingDeletions?: PendingDeletion[];
 }
 
 export function emptyState(): SyncState {
-  return { processed: {}, failedExternal: {} };
+  return { processed: {}, failedExternal: {}, pendingDeletions: [] };
+}
+
+/** Ставит файл в очередь на удаление (без дублей по пути). */
+export function queueDeletion(
+  state: SyncState,
+  file: { path: string; stat: { size: number; mtime: number } }
+): void {
+  const queue = (state.pendingDeletions ??= []);
+  if (queue.some((entry) => entry.path === file.path)) return;
+  queue.push({ path: file.path, size: file.stat.size, mtime: file.stat.mtime });
 }
 
 export function isAlreadyProcessed(

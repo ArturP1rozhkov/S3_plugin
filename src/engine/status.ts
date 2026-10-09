@@ -30,15 +30,44 @@ export interface ResultData {
   lists?: ResultList[];
 }
 
+/** Кнопка действия в модалке результата. */
+export interface ResultAction {
+  label: string;
+  /** Основная (подсвеченная) кнопка. */
+  cta?: boolean;
+  /** Выполняется по клику; содержимое модалки можно обновить через modal.setData(). */
+  run: (modal: ResultModal) => void | Promise<void>;
+}
+
 export class ResultModal extends Modal {
   private data: ResultData;
+  private actions: ResultAction[];
+  private onClosed?: () => void;
 
-  constructor(app: App, data: ResultData) {
+  constructor(
+    app: App,
+    data: ResultData,
+    actions: ResultAction[] = [],
+    onClosed?: () => void
+  ) {
     super(app);
     this.data = data;
+    this.actions = actions;
+    this.onClosed = onClosed;
+  }
+
+  /** Обновляет уже открытую модалку (например, показывает итог после перемещения). */
+  setData(data: ResultData, actions: ResultAction[] = []): void {
+    this.data = data;
+    this.actions = actions;
+    this.render();
   }
 
   onOpen() {
+    this.render();
+  }
+
+  private render(): void {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("s3sync-modal-content");
@@ -68,6 +97,43 @@ export class ResultModal extends Modal {
     for (const list of this.data.lists ?? []) {
       this.renderList(contentEl, list);
     }
+
+    this.renderActions(contentEl);
+  }
+
+  private renderActions(container: HTMLElement): void {
+    if (this.actions.length === 0) return;
+
+    const row = container.createDiv({ cls: "s3sync-modal-actions" });
+
+    const addButton = (
+      label: string,
+      cta: boolean,
+      handler: () => void | Promise<void>
+    ): void => {
+      const opts: { text: string; cls?: string } = { text: label };
+      if (cta) opts.cls = "mod-cta";
+      const btn = row.createEl("button", opts);
+      btn.addEventListener("click", async () => {
+        if (typeof btn.setAttr === "function") btn.setAttr("disabled", "true");
+        try {
+          await handler();
+        } catch (err) {
+          // Действие не должно «подвешивать» вызвавшую его команду.
+          console.error("[S3 Sync] Modal action failed:", err);
+        } finally {
+          if (typeof btn.removeAttribute === "function") btn.removeAttribute("disabled");
+        }
+      });
+    };
+
+    // Порядок: основное действие → второстепенные (Close).
+    for (const action of this.actions.filter((a) => a.cta)) {
+      addButton(action.label, true, () => action.run(this));
+    }
+    for (const action of this.actions.filter((a) => !a.cta)) {
+      addButton(action.label, false, () => action.run(this));
+    }
   }
 
   private renderList(container: HTMLElement, list: ResultList) {
@@ -89,28 +155,6 @@ export class ResultModal extends Modal {
       if (item.value) {
         row.createSpan({ cls: "s3sync-result-list-value", text: item.value });
       }
-    }
-
-    if (list.items.length > 0) {
-      const copyBtn = section.createEl("button", { cls: "s3sync-copy-btn", text: "Copy list" });
-      copyBtn.addEventListener("click", async () => {
-        const text = list.items.map((i) => i.label + (i.value ? `  ${i.value}` : "")).join("\n");
-        try {
-          await navigator.clipboard.writeText(text);
-        } catch {
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          ta.style.position = "fixed";
-          ta.style.opacity = "0";
-          document.body.appendChild(ta);
-          ta.select();
-          const ok = document.execCommand("copy");
-          document.body.removeChild(ta);
-          if (!ok) throw new Error("execCommand copy failed");
-        }
-        copyBtn.setText("Copied!");
-        setTimeout(() => copyBtn.setText("Copy list"), 1500);
-      });
     }
   }
 

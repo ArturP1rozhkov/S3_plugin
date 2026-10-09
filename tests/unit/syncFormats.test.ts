@@ -817,13 +817,14 @@ describe("processMdFile normalization of already-S3 media refs", () => {
   const mp4 = `${base}/media/737f3370db5b06d4b5465358e8957551.mp4`;
   const png = `${base}/media/2ca36c9cd0a42a67f95c164814426b42.png`;
 
-  it("repairs a video that was embedded as an image", async () => {
+  it("repairs a video that was embedded as an image or a plain link", async () => {
     const { app, mdFile } = makeAppWithFiles(
       [],
       [
         `![Pasted image 20261009121119](${mp4})`,
         `![](${mp4})`,
         `<img src="${mp4}">`,
+        `[video](${mp4})`,
       ].join("\n")
     );
     const client = makeClient();
@@ -837,9 +838,9 @@ describe("processMdFile normalization of already-S3 media refs", () => {
       makeLogger()
     );
 
-    expect(changes).toBe(3);
+    expect(changes).toBe(4);
     const player = `<video src="${mp4}" controls></video>`;
-    expect(app.vault.modify.mock.calls[0][1]).toBe([player, player, player].join("\n"));
+    expect(app.vault.modify.mock.calls[0][1]).toBe([player, player, player, player].join("\n"));
     // Ничего не грузим: объект уже в бакете.
     expect(client.send).not.toHaveBeenCalled();
   });
@@ -849,7 +850,6 @@ describe("processMdFile normalization of already-S3 media refs", () => {
       [],
       [
         `<video src="${mp4}" controls></video>`,
-        `[video](${mp4})`,
         `![|550](${png})`,
       ].join("\n")
     );
@@ -890,7 +890,7 @@ describe("processMdFile local file removal", () => {
       mdFile,
       makeLogger(),
       undefined,
-      (name: string) => leftovers.push(name)
+      (file: any) => leftovers.push(file.name)
     );
 
     // Заметка всё равно переписана, но факт неудачного удаления виден.
@@ -950,7 +950,7 @@ describe("processMdFile link mode independence", () => {
     // Побайтово одинаковый результат независимо от режима ссылок
     expect(md.content).toBe(wiki.content);
     expect(md.content).toContain("![|550](");
-    expect(md.content).toContain("[видео](");
+    expect(md.content).toContain("<video src=");
     expect(md.content).toContain("![[d.pdf]]");
   });
 
@@ -1008,8 +1008,7 @@ describe("processMdFile link mode independence", () => {
     expect(newContent).toContain(`![|550](${expectedUrl("png-bytes", ".png")})`);
   });
 
-  it("creates one dummy for markdown-style PDF refs (embed and link)", async () => {
-    const pdfContent = makePdfContent();
+  it("creates one dummy for markdown-style PDF refs (embed and link)", async () => {    const pdfContent = makePdfContent();
     const { app, mdFile, files } = makeAppWithFiles(
       [{ name: "doc.pdf", content: pdfContent }],
       "![alt](Картинки/doc.pdf)\n[](Картинки/doc.pdf)"
@@ -1031,5 +1030,36 @@ describe("processMdFile link mode independence", () => {
     expect(dummy).toBeDefined();
     expect(dummy!.content).not.toContain("%PDF-");
     expect(dummy!.content).toContain("# vault-s3-sync:md5=");
+  });
+});
+
+// Obsidian не экранирует «[» и «]» внутри вики-ссылки: имя вида
+// `Marianne Main Trailer Netflix [get.gt] - 2026-02-15.mp4` должно читаться целиком.
+describe("processMdFile bracketed file names", () => {
+  const name = "Marianne Main Trailer Netflix [get.gt] - 2026-02-15.mp4";
+  const content = "mp4-bytes";
+
+  it("processes a wikilink whose name contains square brackets", async () => {
+    const { app, mdFile, files } = makeAppWithFiles(
+      [{ name, content }],
+      `![[Картинки/${name}]]`
+    );
+    const localFile = files.get(`Картинки/${name}`)!.file;
+    const client = makeClient();
+
+    const changes = await (processMdFile as any)(
+      app,
+      DEFAULT_SETTINGS,
+      client,
+      makeState(),
+      mdFile,
+      makeLogger()
+    );
+
+    expect(changes).toBe(1);
+    expect(app.vault.modify.mock.calls[0][1]).toBe(
+      `<video src="${expectedUrl(content, ".mp4")}" controls></video>`
+    );
+    expect(app.vault.delete).toHaveBeenCalledWith(localFile);
   });
 });

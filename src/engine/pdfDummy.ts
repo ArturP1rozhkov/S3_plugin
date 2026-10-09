@@ -42,6 +42,46 @@ function makeDummyContent(s3url: string, md5: string): string {
   return `${s3url}\n# vault-s3-sync:md5=${md5}\n`;
 }
 
+/**
+ * Гарантирует, что папка для dummy существует.
+ * `vault.create()` НЕ создаёт родительские папки, поэтому после переименования
+ * папки в vault (при старой настройке) создание dummy падало с
+ * `ENOENT: no such file or directory`. Папку создаём сами — сначала штатным
+ * `createFolder` (попадает в индекс Obsidian), при неудаче — через адаптер.
+ */
+async function ensureFolder(app: App, folder: string): Promise<void> {
+  if (!folder || folder === "/") return;
+  if (!app.vault.adapter || typeof app.vault.adapter.mkdir !== "function") return;
+
+  const missing: string[] = [];
+  let acc = "";
+  for (const part of folder.split("/")) {
+    acc = acc ? `${acc}/${part}` : part;
+    let exists = false;
+    try {
+      exists = await app.vault.adapter.exists(acc);
+    } catch {
+      exists = false;
+    }
+    if (!exists) missing.push(acc);
+  }
+  if (missing.length === 0) return;
+
+  for (const path of missing) {
+    try {
+      await app.vault.createFolder(path);
+    } catch {
+      try {
+        await app.vault.adapter.mkdir(path);
+      } catch (err) {
+        console.warn(`[S3 Sync] Could not create folder "${path}": ${err}`);
+      }
+    }
+  }
+  // Даём Obsidian подхватить новую папку перед созданием файла.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
 /** Returns a unique dummy filename that does not collide with an existing
  *  non-matching file in the dummy folder. If the exact name is occupied by
  *  a file with a different hash (or a real PDF without a hash comment),
@@ -111,6 +151,9 @@ export async function ensurePdfDummy(
 
   const dummyFolder = normalizePath(settings.pdfDummyFolder);
   const canonicalContent = makeDummyContent(s3url, fileHash);
+
+  // Папку мог переименовать/удалить пользователь — без неё vault.create() падает.
+  await ensureFolder(app, dummyFolder);
 
   const allFiles = app.vault.getFiles();
   const candidates = allFiles.filter((f) => {

@@ -26,6 +26,8 @@ import { md5Buffer } from "./md5";
 import { ensurePdfDummy, isDummyPdf } from "./pdfDummy";
 import {
   markProcessed,
+  queueDeletion,
+  type PendingDeletion,
 } from "../state";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -75,6 +77,24 @@ export type UploadResult =
   | { status: "empty" }
   | { status: "error"; reason: string };
 
+/**
+ * Повторяет сетевую операцию при временном сбое (rustfs/S3 иногда отдаёт
+ * «Failed to fetch» на большом теле запроса). Тело запроса уже в памяти,
+ * поэтому повтор дешёвый.
+ */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 2): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+  throw lastErr;
+}
+
 async function uploadFile(
   app: App,
   settings: VaultS3Settings,
@@ -100,7 +120,7 @@ async function uploadFile(
 
     // Проверяем, нет ли уже в S3 идентичного объекта (по ключу/ETag/размеру),
     // чтобы избежать повторной загрузки того же файла.
-    const existing = await headObject(client, settings.s3, key);
+    const existing = await withRetry(() => headObject(client, settings.s3, key));
     if (
       existing &&
       existing.ContentLength === buf.byteLength &&
@@ -127,7 +147,9 @@ async function uploadFile(
       "source-note":   encodeURIComponent(noteRelPath),
     };
 
-    await uploadBuffer(client, settings.s3, key, new Uint8Array(buf), contentType, metadata);
+    await withRetry(() =>
+      uploadBuffer(client, settings.s3, key, new Uint8Array(buf), contentType, metadata)
+    );
     return { status: "ok", url: publicUrl(settings.s3, key) };
   } catch (err) {
     console.error(`[S3 Sync] Upload failed: ${file.name}`, err);
@@ -220,6 +242,43 @@ async function removeLocalFile(app: App, file: TFile, logger: SyncLogger): Promi
   return false;
 }
 
+/**
+ * Добивает удаления, которые не прошли в прошлые прогоны (файл был занят
+ * Obsidian'ом). Файл удаляем только если он не изменился — иначе это уже
+ * другой файл пользователя.
+ */
+async function flushPendingDeletions(
+  app: App,
+  state: SyncState,
+  logger: SyncLogger
+): Promise<{ done: number; pending: number }> {
+  const queue = state.pendingDeletions ?? [];
+  if (queue.length === 0) return { done: 0, pending: 0 };
+
+  const still: PendingDeletion[] = [];
+  let done = 0;
+
+  for (const entry of queue) {
+    const file = app.vault.getAbstractFileByPath(entry.path);
+    if (!(file instanceof TFile)) {
+      done++;                       // файла уже нет — запись не нужна
+      continue;
+    }
+    if (file.stat.size !== entry.size || file.stat.mtime !== entry.mtime) {
+      continue;                     // файл пересоздан/изменён — не трогаем
+    }
+    if (await removeLocalFile(app, file, logger)) {
+      logger.info(`Removed deferred local file: ${file.name}`);
+      done++;
+    } else {
+      still.push(entry);
+    }
+  }
+
+  state.pendingDeletions = still;
+  return { done, pending: still.length };
+}
+
 export async function processMdFile(
   app: App,
   settings: VaultS3Settings,
@@ -228,7 +287,7 @@ export async function processMdFile(
   mdFile: TFile,
   logger: SyncLogger,
   onEmpty?: (fileName: string, notePath: string) => void,
-  onLeftover?: (fileName: string, notePath: string) => void
+  onLeftover?: (file: TFile, notePath: string) => void
 ): Promise<number> {
   let content = await app.vault.read(mdFile);
   const noteRelPath = mdFile.path;
@@ -386,7 +445,10 @@ export async function processMdFile(
       logger.info(`Removed local file: ${file.name}`);
     } else {
       logger.warn(`Local file was NOT removed: ${file.path}`);
-      onLeftover?.(file.name, noteRelPath);
+      // Повторим при следующем запуске: Obsidian обычно отпускает файл к тому
+      // моменту, а до тех пор файл не потеряется.
+      queueDeletion(state, file);
+      onLeftover?.(file, noteRelPath);
     }
   }
 
@@ -420,7 +482,7 @@ export async function cmdSync(
 
   let totalReplacements = 0;
   const emptyFiles: { fileName: string; notePath: string }[] = [];
-  const leftovers: { fileName: string; notePath: string }[] = [];
+  const leftovers: { file: TFile; notePath: string }[] = [];
   const errors: string[] = [];
   const failedLog = {
     ...log,
@@ -434,9 +496,16 @@ export async function cmdSync(
     emptyFiles.push({ fileName, notePath });
   };
 
-  const onLeftover = (fileName: string, notePath: string) => {
-    leftovers.push({ fileName, notePath });
+  const onLeftover = (file: TFile, notePath: string) => {
+    leftovers.push({ file, notePath });
   };
+
+  // Добиваем удаления, не прошедшие в прошлые прогоны: к этому моменту
+  // Obsidian обычно уже отпустил файлы, которые держал плеер.
+  const flushed = await flushPendingDeletions(app, state, failedLog);
+  if (flushed.done > 0 || flushed.pending > 0) {
+    log.info(`Deferred deletions: ${flushed.done} removed, ${flushed.pending} still locked`);
+  }
 
   for (let i = 0; i < mdFiles.length; i++) {
     totalReplacements += await processMdFile(
@@ -445,7 +514,24 @@ export async function cmdSync(
     if ((i + 1) % 50 === 0) new Notice(`S3 Sync: ${i + 1}/${mdFiles.length} notes processed…`);
   }
 
-  const hasWarnings = errors.length > 0 || emptyFiles.length > 0 || leftovers.length > 0;
+  // Часть файлов Obsidian не отдаёт, пока медиа открыто в заметке. К концу
+  // прогона заметки уже переписаны на S3, хендлы обычно отпущены — поэтому
+  // отложенные удаления пробуем ещё раз и только потом жалуемся в отчёте.
+  const kept: { file: TFile; notePath: string }[] = [];
+  if (leftovers.length > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    for (const l of leftovers) {
+      const fresh = app.vault.getAbstractFileByPath(l.file.path);
+      const target = fresh instanceof TFile ? fresh : l.file;
+      if (await removeLocalFile(app, target, failedLog)) {
+        log.info(`Removed local file (deferred): ${target.name}`);
+      } else {
+        kept.push(l);
+      }
+    }
+  }
+
+  const hasWarnings = errors.length > 0 || emptyFiles.length > 0 || kept.length > 0;
   const success = !hasWarnings && totalReplacements >= 0;
   const icon = success ? "✅" : totalReplacements > 0 ? "⚠️" : "❌";
   const subtitle = targetFiles && targetFiles.length === 1
@@ -463,7 +549,10 @@ export async function cmdSync(
           "📝 Notes processed": String(mdFiles.length),
           "🔗 Embeds replaced": String(totalReplacements),
           "⚠️ Skipped (0-byte files)": String(emptyFiles.length),
-          "⚠️ Local files kept": leftovers.length > 0 ? String(leftovers.length) : "none",
+          "⚠️ Local files kept": kept.length > 0 ? String(kept.length) : "none",
+          ...(flushed.done > 0 || flushed.pending > 0
+            ? { "🧹 Deferred deletions": `${flushed.done} removed, ${flushed.pending} still locked` }
+            : {}),
           "⚠️ Errors": errors.length > 0 ? String(errors.length) : "none",
         },
         error: hasWarnings,
@@ -494,11 +583,11 @@ export async function cmdSync(
     });
   }
 
-  if (leftovers.length > 0) {
+  if (kept.length > 0) {
     lists.push({
       title: "Uploaded, but local copy was not removed",
       icon: "⚠️",
-      items: leftovers.slice(0, 50).map((e) => ({ label: e.fileName, value: e.notePath })),
+      items: kept.slice(0, 50).map((e) => ({ label: e.file.name, value: e.notePath })),
       initiallyExpanded: true,
     });
     data.sections.push({

@@ -161,48 +161,77 @@ export async function cmdCleanupS3(
     return { moved: 0 };
   }
 
-  // ── Сначала показываем найденное, потом спрашиваем подтверждение ──────────
-  showCleanupS3Result(app, true, { orphans, totalSize }, "Cleanup S3 — Found Orphans");
-
-  // ── Confirm before real move ──────────────────────────────────────────────
-  const confirmed = await askConfirmation(
-    app,
-    `Move ${orphans.length} orphan S3 object(s) to quarantine prefix "${s3.quarantineFolder}/"?`
-  );
-  if (!confirmed) {
-    console.log("[S3 CleanupS3] Cancelled by user");
-    return { moved: 0 };
-  }
-
-  // ── Delete expired quarantine objects ─────────────────────────────────────
-  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
-  let deleted = 0;
-  for (const obj of allObjects) {
-    if (obj.key.startsWith(quarantinePrefix) && obj.lastModified < cutoff) {
-      try {
-        await deleteObject(client, s3.bucket, obj.key);
-        deleted++;
-      } catch { /* пропустить */ }
-    }
-  }
-
-  // ── Move orphans to quarantine ────────────────────────────────────────────
   let moved = 0;
-  for (const obj of orphans) {
-    // Сохраняем оригинальный путь в имени: "media/abc.jpg" → "quarantine/media_abc.jpg"
-    const quarantineKey = quarantinePrefix + obj.key.replace(/\//g, "_");
-    try {
-      await moveObject(client, s3.bucket, obj.key, quarantineKey);
-      console.log(`[S3 CleanupS3] → quarantine: ${obj.key}`);
-      moved++;
-    } catch (err) {
-      console.warn(`[S3 CleanupS3] Could not move: ${obj.key}`, err);
-    }
-  }
+  let deleted = 0;
 
-  console.log(`[S3 CleanupS3] 🪣 S3 Cleanup: ${moved} objects → quarantine, ${deleted} expired deleted`);
+  // ── Одна модалка на весь сценарий: список + кнопка перемещения ────────────
+  // Отдельного диалога подтверждения и второй плашки больше нет: результат
+  // показывается в той же модалке.
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
 
-  showCleanupS3Result(app, false, { orphans, moved, deleted, totalSize });
+    const modal = new ResultModal(
+      app,
+      buildCleanupS3Result(true, { orphans, totalSize }, "Cleanup S3 — Found Orphans"),
+      [
+        {
+          label: `Move ${orphans.length} object(s) to quarantine`,
+          cta: true,
+          run: async (m) => {
+            try {
+              // ── Delete expired quarantine objects ─────────────────────────
+              const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+              for (const obj of allObjects) {
+                if (obj.key.startsWith(quarantinePrefix) && obj.lastModified < cutoff) {
+                  try {
+                    await deleteObject(client, s3.bucket, obj.key);
+                    deleted++;
+                  } catch { /* пропустить */ }
+                }
+              }
+
+              // ── Move orphans to quarantine ────────────────────────────────
+              for (const obj of orphans) {
+                // Оригинальный путь в имени: "media/abc.jpg" → "quarantine/media_abc.jpg"
+                const quarantineKey = quarantinePrefix + obj.key.replace(/\//g, "_");
+                try {
+                  await moveObject(client, s3.bucket, obj.key, quarantineKey);
+                  console.log(`[S3 CleanupS3] → quarantine: ${obj.key}`);
+                  moved++;
+                } catch (err) {
+                  console.warn(`[S3 CleanupS3] Could not move: ${obj.key}`, err);
+                }
+              }
+
+              console.log(`[S3 CleanupS3] 🪣 S3 Cleanup: ${moved} objects → quarantine, ${deleted} expired deleted`);
+              // Одной плашки достаточно: закрываем её и показываем короткий итог.
+              m.close();
+              new Notice(
+                `Cleanup S3: ${moved} object(s) moved to quarantine` +
+                (deleted > 0 ? `, ${deleted} expired deleted` : "")
+              );
+            } finally {
+              finish();
+            }
+          },
+        },
+        {
+          label: "Close",
+          run: async (m) => { m.close(); },
+        },
+      ],
+      finish
+    );
+
+    modal.open();
+  });
+
   return { moved };
 }
 
@@ -214,20 +243,6 @@ interface CleanupS3ResultInput {
   error?: string;
 }
 
-function askConfirmation(app: App, message: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const modal = new Modal(app);
-    modal.titleEl.setText("Confirm action");
-    modal.contentEl.createEl("p", { text: message });
-    const btnContainer = modal.contentEl.createDiv({ cls: "s3sync-confirm-buttons" });
-    const ok = btnContainer.createEl("button", { text: "Move to quarantine", cls: "mod-cta" });
-    const cancel = btnContainer.createEl("button", { text: "Cancel" });
-    ok.addEventListener("click", () => { modal.close(); resolve(true); });
-    cancel.addEventListener("click", () => { modal.close(); resolve(false); });
-    modal.open();
-  });
-}
-
 function groupByPrefix(keys: string[]): Record<string, string[]> {
   const groups: Record<string, string[]> = {};
   for (const key of keys) {
@@ -237,23 +252,20 @@ function groupByPrefix(keys: string[]): Record<string, string[]> {
   return groups;
 }
 
-function showCleanupS3Result(
-  app: App,
+function buildCleanupS3Result(
   dryRun: boolean,
   input: CleanupS3ResultInput,
   titleOverride?: string
-): void {
+): ResultData {
   const { orphans = [], moved = 0, deleted = 0, totalSize = 0, error } = input;
 
   if (error) {
-    const data: ResultData = {
-      title: "Cleanup S3",
+    return {
+      title: titleOverride ?? "Cleanup S3",
       icon: "❌",
       subtitle: "Failed",
       sections: [{ title: "", rows: { "⚠️ Error": error }, error: true }],
     };
-    new ResultModal(app, data).open();
-    return;
   }
 
   const sections: ResultData["sections"] = [
@@ -291,7 +303,7 @@ function showCleanupS3Result(
     });
   }
 
-  const data: ResultData = {
+  return {
     title: titleOverride ?? (dryRun ? "Cleanup S3 - Dry Run" : "Cleanup S3 - Completed"),
     icon: dryRun ? "🔍" : "☁️🗑️",
     subtitle: dryRun
@@ -300,6 +312,14 @@ function showCleanupS3Result(
     sections,
     lists: lists.length > 0 ? lists : undefined,
   };
+}
 
-  new ResultModal(app, data).open();
+/** Одно-модальные случаи: ошибка, «нечего делать», dry run. */
+function showCleanupS3Result(
+  app: App,
+  dryRun: boolean,
+  input: CleanupS3ResultInput,
+  titleOverride?: string
+): void {
+  new ResultModal(app, buildCleanupS3Result(dryRun, input, titleOverride)).open();
 }

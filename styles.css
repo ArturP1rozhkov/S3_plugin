@@ -47,16 +47,23 @@
 .s3sync-result-list-icon { flex-shrink: 0; }
 .s3sync-result-list-label { flex: 1 1 auto; word-break: break-all; }
 .s3sync-result-list-value { flex-shrink: 0; color: var(--text-muted); }
-.s3sync-copy-btn {
-  margin-top: var(--size-4-2);
-  padding: var(--size-4-1) var(--size-4-3);
-  background: var(--interactive-normal);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  cursor: pointer;
-  font-size: var(--font-small);
+
+/* Ряд кнопок действий: по центру, с отступом друг от друга, у нижнего края плашки */
+.s3sync-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-5);
+  justify-content: center;
+  align-items: center;
+  margin-top: auto;
+  padding-top: var(--size-4-4);
+  padding-bottom: var(--size-4-2);
+  border-top: 1px solid var(--background-modifier-border);
 }
-.s3sync-copy-btn:hover { background: var(--interactive-hover); }
+.s3sync-modal-actions button {
+  min-width: 140px;
+  padding: var(--size-4-2) var(--size-4-4);
+}
 
 /* Confirmation dialog */
 .s3sync-confirm-buttons { display: flex; gap: var(--size-4-2); justify-content: flex-end; margin-top: var(--size-4-3); }

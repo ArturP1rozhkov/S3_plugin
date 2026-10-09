@@ -82,6 +82,20 @@ describe("refExt and refFilename", () => {
 });
 
 describe("parseAllRefs", () => {
+  it("parses a wikilink whose file name contains square brackets", () => {
+    const refs = parseAllRefs("![[Marianne Main Trailer Netflix [get.gt] - 2026-02-15.mp4]]");
+    expect(refs).toHaveLength(1);
+    expect(refs[0].kind).toBe("wiki-embed");
+    expect(refs[0].ref).toBe("Marianne Main Trailer Netflix [get.gt] - 2026-02-15.mp4");
+    expect(isAttachmentCandidate(refs[0], ATTACHMENT_EXT)).toBe(true);
+  });
+
+  it("still splits the alias for bracketed names", () => {
+    const refs = parseAllRefs("![[Folder/file [v2] name.png|720]]");
+    expect(refs[0].ref).toBe("Folder/file [v2] name.png");
+    expect(refs[0].altText).toBe("720");
+  });
+
   it.each([
     ["![[img.jpg]]", "wiki-embed", "img.jpg", ""],
     ["[[Folder/img.jpg|alias]]", "wiki-link", "Folder/img.jpg", "alias"],
@@ -323,14 +337,24 @@ describe("makeReplacement", () => {
     );
   });
 
-  it("upgrades local markdown links exactly like wiki links", () => {
+  it("gives media the same player form for links and embeds", () => {
+    // Видео/аудио рендерятся сразу, независимо от способа вставки.
+    expect(makeReplacement(url, "clip.mp4", ".mp4", "видео", 550, "md-link")).toBe(
+      `<video src="${url}" controls></video>`
+    );
+    expect(makeReplacement(url, "clip.mp4", ".mp4", "видео", 550, "wiki-link")).toBe(
+      `<video src="${url}" controls></video>`
+    );
+    expect(makeReplacement(url, "sound.mp3", ".mp3", "", 550, "md-link")).toBe(
+      `<audio src="${url}" controls></audio>`
+    );
     // Картинка: принудительный «!» + ширина, чтобы рендерилась сразу.
     expect(makeReplacement(url, "image.jpg", ".jpg", "фото", 550, "md-link")).toBe(
       `![|550](${url})`
     );
-    // Не картинка: обычная ссылка, подпись из alt или из имени файла.
-    expect(makeReplacement(url, "clip.mp4", ".mp4", "видео", 550, "md-link")).toBe(
-      `[видео](${url})`
+    // Не медиа: обычная ссылка.
+    expect(makeReplacement(url, "doc.docx", ".docx", "док", 550, "md-link")).toBe(
+      `[док](${url})`
     );
     expect(makeReplacement(url, "report.pdf", ".pdf", "документ", 550, "md-link")).toBe(
       "![[report.pdf]]"
@@ -343,17 +367,18 @@ describe("canonicalMediaTag", () => {
   const mp3 = "https://s3.example/media/a.mp3";
   const png = "https://s3.example/media/a.png";
 
-  it("rewrites video/audio that was embedded as an image", () => {
+  it("rewrites video/audio that was embedded as an image or a link", () => {
     expect(canonicalMediaTag("md-embed", mp4)).toBe(`<video src="${mp4}" controls></video>`);
     expect(canonicalMediaTag("wiki-embed", mp4)).toBe(`<video src="${mp4}" controls></video>`);
     expect(canonicalMediaTag("html-img", mp3)).toBe(`<audio src="${mp3}" controls></audio>`);
+    expect(canonicalMediaTag("md-link", mp4)).toBe(`<video src="${mp4}" controls></video>`);
+    expect(canonicalMediaTag("wiki-link", mp3)).toBe(`<audio src="${mp3}" controls></audio>`);
   });
 
   it("leaves correct forms untouched", () => {
     expect(canonicalMediaTag("html-video", mp4)).toBeNull();
+    expect(canonicalMediaTag("html-audio", mp3)).toBeNull();
     expect(canonicalMediaTag("html-source", mp4)).toBeNull();
-    expect(canonicalMediaTag("wiki-link", mp4)).toBeNull();
-    expect(canonicalMediaTag("md-link", mp4)).toBeNull();
     expect(canonicalMediaTag("md-embed", png)).toBeNull();
     expect(canonicalMediaTag("md-embed", "https://s3.example/docs/a.pdf")).toBeNull();
   });

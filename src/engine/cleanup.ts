@@ -13,20 +13,6 @@ import {
 import { ATTACHMENT_EXT } from "./fileClassifier";
 import { ResultModal, type ResultData } from "./status";
 
-function askConfirmation(app: App, message: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const modal = new Modal(app);
-    modal.titleEl.setText("Confirm action");
-    modal.contentEl.createEl("p", { text: message });
-    const btnContainer = modal.contentEl.createDiv({ cls: "s3sync-confirm-buttons" });
-    const ok = btnContainer.createEl("button", { text: "Move to trash", cls: "mod-cta" });
-    const cancel = btnContainer.createEl("button", { text: "Cancel" });
-    ok.addEventListener("click", () => { modal.close(); resolve(true); });
-    cancel.addEventListener("click", () => { modal.close(); resolve(false); });
-    modal.open();
-  });
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function isIgnored(path: string, ignoreFolders: string[]): boolean {
@@ -307,106 +293,93 @@ export async function cmdCleanup(
     return { orphans: orphans.length, moved: 0 };
   }
 
-  // 3. Сначала показываем, что нашли (со списком), и только потом спрашиваем
-  //    подтверждение на перемещение — так решение принимается по фактам.
-  const preview: ResultData = {
-    title: "Cleanup — Found Orphans",
-    icon: "🔍",
-    subtitle: `${orphans.length} orphan file(s) found`,
-    sections: [
-      {
-        title: "",
-        rows: {
-          "🗑️ Orphan files found": String(orphans.length),
-          "📦 Total size": `${(orphans.reduce((s, f) => s + f.stat.size, 0) / 1024 / 1024).toFixed(2)} MB`,
-        },
-      },
-    ],
-    lists: [
-      {
-        title: "Orphan files",
-        icon: "🔍",
-        items: orphanItems,
-        initiallyExpanded: orphanItems.length <= 15,
-        maxInitialItems: 15,
-      },
-    ],
-  };
-  new ResultModal(app, preview).open();
-
-  // 4. Подтверждение перед реальным перемещением
-  const confirmed = await askConfirmation(
-    app,
-    `Move ${orphans.length} orphan file(s) to trash folder "${settings.trashFolder}"?`
-  );
-  if (!confirmed) {
-    log.info("CLEANUP local cancelled by user");
-    return { orphans: orphans.length, moved: 0 };
-  }
-
-  // 5. Перемещаем orphans в trash папку
-  // settings.trashFolder берётся напрямую из VaultS3Settings (не из settings.options)
+  // 3. Одна модалка на весь сценарий: статистика + список + кнопки.
+  //    «Move … to trash» выполняет перемещение и показывает итог в этой же
+  //    модалке; отдельного диалога подтверждения и второй плашки больше нет.
   const trashFolder = settings.trashFolder;
-
-  // Папка назначения: если она уже есть — mkdir может бросить исключение,
-  // поэтому ensureFolderExists глотает ошибку и cleanup продолжается.
-  await ensureFolderExists(app, trashFolder);
-
+  const sizeText = `${(orphans.reduce((s, f) => s + f.stat.size, 0) / 1024 / 1024).toFixed(2)} MB`;
   let moved = 0;
   const failed: { path: string; reason: string }[] = [];
 
-  for (const f of orphans) {
-    const res = await moveToTrash(app, f, trashFolder);
-    if (res.ok) {
-      log.info(`  Orphan → trash: ${f.name}`);
-      moved++;
-    } else {
-      const reason = res.reason ?? "unknown error";
-      log.warn(`  Could not move ${f.name}: ${reason}`);
-      failed.push({ path: f.path, reason });
-    }
-  }
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
 
-  log.info(`CLEANUP local complete: ${moved} moved to trash, ${failed.length} failed`);
-
-  const data: ResultData = {
-    title: "Cleanup — Completed",
-    icon: failed.length > 0 ? "⚠️" : "🗑️",
-    subtitle: `${moved} of ${orphans.length} orphan file(s) moved to trash`,
-    sections: [
+    const modal = new ResultModal(
+      app,
       {
-        title: "",
-        rows: {
-          "🗑️ Orphan files found": String(orphans.length),
-          "📦 Total size": `${(orphans.reduce((s, f) => s + f.stat.size, 0) / 1024 / 1024).toFixed(2)} MB`,
-          "✅ Moved to trash": String(moved),
-          ...(failed.length > 0 ? { "❌ Failed to move": String(failed.length) } : {}),
-        },
-        error: failed.length > 0,
+        title: "Cleanup — Found Orphans",
+        icon: "🔍",
+        subtitle: `${orphans.length} orphan file(s) found`,
+        sections: [
+          {
+            title: "",
+            rows: {
+              "🗑️ Orphan files found": String(orphans.length),
+              "📦 Total size": sizeText,
+            },
+          },
+        ],
+        lists: [
+          {
+            title: "Orphan files",
+            icon: "🔍",
+            items: orphanItems,
+            initiallyExpanded: true,
+            maxInitialItems: 15,
+          },
+        ],
       },
-    ],
-  };
+      [
+        {
+          label: `Move ${orphans.length} file(s) to trash`,
+          cta: true,
+          run: async (m) => {
+            try {
+              // Папка назначения: если она уже есть, mkdir может бросить исключение,
+              // поэтому ensureFolderExists глотает ошибку и cleanup продолжается.
+              await ensureFolderExists(app, trashFolder);
 
-  const lists: ResultData["lists"] = [];
-  if (orphanItems.length > 0) {
-    lists.push({
-      title: "Moved files",
-      icon: "🗑️",
-      items: orphanItems,
-      initiallyExpanded: orphanItems.length <= 15,
-      maxInitialItems: 15,
-    });
-  }
-  if (failed.length > 0) {
-    lists.push({
-      title: "Files that could not be moved",
-      icon: "❌",
-      items: failed.map((f) => ({ label: f.path, value: f.reason })),
-      initiallyExpanded: true,
-    });
-  }
-  if (lists.length > 0) data.lists = lists;
+              for (const f of orphans) {
+                const res = await moveToTrash(app, f, trashFolder);
+                if (res.ok) {
+                  log.info(`  Orphan → trash: ${f.name}`);
+                  moved++;
+                } else {
+                  const reason = res.reason ?? "unknown error";
+                  log.warn(`  Could not move ${f.name}: ${reason}`);
+                  failed.push({ path: f.path, reason });
+                }
+              }
 
-  new ResultModal(app, data).open();
+              log.info(`CLEANUP local complete: ${moved} moved to trash, ${failed.length} failed`);
+              // Одной плашки достаточно: закрываем её и показываем короткий итог.
+              m.close();
+              new Notice(
+                failed.length > 0
+                  ? `Cleanup: moved ${moved} of ${orphans.length} file(s) to trash, ${failed.length} failed (see console)`
+                  : `Cleanup: moved ${moved} of ${orphans.length} file(s) to trash`
+              );
+            } finally {
+              finish();
+            }
+          },
+        },
+        {
+          label: "Close",
+          run: async (m) => { m.close(); },
+        },
+      ],
+      finish
+    );
+
+    modal.open();
+  });
+
   return { orphans: orphans.length, moved };
 }

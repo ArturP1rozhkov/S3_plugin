@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { isDummyPdf } from "../../src/engine/pdfDummy";
+import { ensurePdfDummy, isDummyPdf } from "../../src/engine/pdfDummy";
 
 vi.mock("obsidian", () => {
   class App {}
@@ -12,6 +12,50 @@ vi.mock("obsidian", () => {
 
 const pdfUrl = "http://127.0.0.1:9000/obsidian-plugin-test/docs/c62ec98d095431469103e7318dd9df8a.pdf";
 const httpsPdfUrl = "https://s3.example/bucket/docs/report.pdf";
+
+describe("ensurePdfDummy", () => {
+  function makeApp() {
+    const createdFolders: string[] = [];
+    const createdFiles: string[] = [];
+    const app: any = {
+      vault: {
+        adapter: {
+          exists: async (p: string) => createdFolders.includes(p),
+          mkdir: async (p: string) => { createdFolders.push(p); },
+        },
+        createFolder: async (p: string) => { createdFolders.push(p); },
+        getFiles: () => [],
+        getAbstractFileByPath: () => null,
+        create: async (p: string) => { createdFiles.push(p); return {}; },
+        read: async () => "",
+        modify: async () => {},
+      },
+    };
+    return { app, createdFolders, createdFiles };
+  }
+
+  it("creates the dummy folder when it is missing in the vault", async () => {
+    const { app, createdFolders, createdFiles } = makeApp();
+    const settings: any = { pdfDummyFolder: "Объекты из бакета" };
+
+    const name = await ensurePdfDummy(app, settings, "doc.pdf", "a".repeat(32), httpsPdfUrl);
+
+    // Папка была переименована/удалена — плагин создаёт её сам, вместо ENOENT.
+    expect(createdFolders).toContain("Объекты из бакета");
+    expect(createdFiles).toEqual(["Объекты из бакета/doc.pdf"]);
+    expect(name).toBe("doc.pdf");
+  });
+
+  it("does not touch an existing folder", async () => {
+    const { app, createdFolders } = makeApp();
+    app.vault.adapter.exists = async () => true;
+    const settings: any = { pdfDummyFolder: "Объекты из бакета" };
+
+    await ensurePdfDummy(app, settings, "doc.pdf", "a".repeat(32), httpsPdfUrl);
+
+    expect(createdFolders).toEqual([]);
+  });
+});
 
 describe("isDummyPdf", () => {
   it("recognizes bare URL: file.pdf", () => {

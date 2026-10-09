@@ -17,10 +17,16 @@ vi.mock("obsidian", () => {
       setAttr: vi.fn(() => el),
       appendChild: vi.fn(() => el),
       addEventListener: (ev: string, cb: () => void) => {
-        if (ev === "click" && opts?.text === "Move to trash") cb();
+        // Кнопки действий в ResultModal: «Move N file(s) to trash» /
+        // «Move N object(s) to quarantine» — нажимаем сразу.
+        if (ev === "click" && typeof opts?.text === "string" && /to trash|to quarantine/.test(opts.text)) {
+          cb();
+        }
       },
       createEl: vi.fn((_tag: string, o?: any) => makeStubEl(o)),
       createDiv: vi.fn((o?: any) => makeStubEl(o)),
+      createSpan: vi.fn((o?: any) => makeStubEl(o)),
+      appendText: vi.fn(() => el),
     };
     return el;
   }
@@ -34,8 +40,8 @@ vi.mock("obsidian", () => {
       this.contentEl = makeStubEl();
       this.titleEl = makeStubEl();
     }
-    open() {}
-    close() {}
+    open() { (this as any).onOpen?.(); }
+    close() { (this as any).onClose?.(); }
   },
   Notice: class {
     constructor(public message: string, public timeout?: number) {}

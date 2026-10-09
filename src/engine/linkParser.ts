@@ -21,8 +21,11 @@ export interface ParsedRef {
 
 // Раздельные регэкспы для embed и обычных wiki-ссылок.
 // Embed: ![[file]] | ![[file|750]] | ![[file|300x200]]
-const RE_WIKI_EMBED = /(?<!\^)!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
-const RE_WIKI_LINK  = /(?<!\^)\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+// Имя вложения может содержать «[» и «]» (Obsidian не экранирует их внутри
+// вики-ссылки, например `Marianne Main Trailer [get.gt] - 2026-02-15.mp4`),
+// поэтому цель берём лениво до первого «]]», а не «всё, кроме ] и |».
+const RE_WIKI_EMBED = /(?<!\^)!\[\[(.+?)(?:\|([^\]]*))?\]\]/g;
+const RE_WIKI_LINK  = /(?<!\^)\[\[(.+?)(?:\|([^\]]*))?\]\]/g;
 
 // Markdown image/link: ![alt](url "title") / [text](url).
 // Title в кавычках после URL стрипаем отдельно.
@@ -250,10 +253,11 @@ export function canonicalMediaTag(kind: RefKind, ref: string): string | null {
   const isAudio = AUDIO_EXT.has(ext);
   if (!isVideo && !isAudio) return null;
 
-  // Починка нужна только там, где медиа вставлено как картинка.
-  const renderedAsImage = kind === "md-embed" || kind === "wiki-embed" || kind === "html-img";
-  if (!renderedAsImage) return null;
+  // Плеер уже стоит — менять нечего.
+  if (kind === "html-video" || kind === "html-audio" || kind === "html-source") return null;
 
+  // Ссылку и картинку на медиа приводим к плееру: рендер должен появляться
+  // сразу и не зависеть от того, как файл вставили.
   return isVideo
     ? `<video src="${ref}" controls></video>`
     : `<audio src="${ref}" controls></audio>`;
@@ -270,6 +274,11 @@ export function makeReplacement(
   const w = imageWidth ?? 550;
   const label = altText || filename.replace(/\.[^.]+$/, "");
 
+  // Медиа всегда отдаём плеером: результат sync не должен зависеть от того,
+  // вставили файл перетаскиванием («!») или ссылкой из буфера (без «!»).
+  if (VIDEO_EXT.has(fileExt)) return `<video src="${url}" controls></video>`;
+  if (AUDIO_EXT.has(fileExt)) return `<audio src="${url}" controls></audio>`;
+
   // Non-embed wiki/markdown link is replaced with a markdown reference.
   // Images become embeds (картинка должна рендериться, ширина сохраняется),
   // everything else becomes a plain markdown link.
@@ -281,8 +290,6 @@ export function makeReplacement(
   }
 
   if (IMAGE_EXT.has(fileExt)) return `![|${w}](${url})`;
-  if (VIDEO_EXT.has(fileExt)) return `<video src="${url}" controls></video>`;
-  if (AUDIO_EXT.has(fileExt)) return `<audio src="${url}" controls></audio>`;
 
   // PDF остаётся как wiki-embed на dummy файл в vault (для PDF++ plugin)
   if (fileExt === ".pdf") return `![[${filename}]]`;
