@@ -1,17 +1,29 @@
 services:
   rustfs:
     image: rustfs/rustfs:latest
-    container_name: s3-plugin-rustfs
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      RUSTFS_ACCESS_KEY: rustfsadmin
-      RUSTFS_SECRET_KEY: rustfsadmin
-      RUSTFS_CONSOLE_ENABLE: "true"
-    volumes:
-      - rustfs-data:/data
+    container_name: obsidian-s3-test
     restart: unless-stopped
 
+    ports:
+      # Явный 127.0.0.1 обязателен: на Windows "localhost" может уйти в ::1,
+      # а RustFS слушает только IPv4.
+      - "127.0.0.1:9000:9000" # S3 API
+      - "127.0.0.1:9001:9001" # web-консоль
+
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_ACCESS_KEY: local-dev-access
+      RUSTFS_SECRET_KEY: local-dev-secret-change-me
+      RUSTFS_CONSOLE_ENABLE: "true"
+      # Без этой переменной S3 API не отдаёт CORS-заголовки вообще, и Obsidian
+      # (рендерер Electron, origin app://obsidian.md) получает "Failed to fetch".
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+
+    volumes:
+      - rustfs_data:/data
+
 volumes:
-  rustfs-data:
+  rustfs_data:
+    name: obsidian_plugin_rustfs_data

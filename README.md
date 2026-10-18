@@ -1,29 +1,685 @@
-# Vault S3 Sync — Obsidian Plugin
+# Vault S3 Sync — плагин Obsidian
 
-Upload vault attachments (images, video, audio, PDF, docs) to any S3-compatible storage  
-(cloud.ru / SberCloud / MinIO / AWS) and replace local links with proper embeds/links in notes.
+Переносит вложения vault (картинки, видео, аудио, PDF, документы, архивы) в S3-совместимое
+хранилище и заменяет локальные ссылки в заметках на нормальные embed'ы и ссылки.
 
-## Features
+Проверено на **cloud.ru / SberCloud S3** и **RustFS** (локальный Docker-стенд);
+должно работать с MinIO, AWS S3 и любым S3-совместимым хранилищем.
 
-| Command | Description |
-|---|---|
-| **Sync** | Scan notes, upload attachments, replace local links |
-| **Cleanup** | Move local orphan files to trash folder |
-| **Cleanup S3** | Move S3 orphan objects to quarantine prefix |
-| **Status** | Show vault & bucket statistics |
+---
 
-## Installation (development)
+## Содержание
+
+1. [Что делает плагин](#что-делает-плагин)
+2. [Требования](#требования)
+3. [Установка](#установка)
+4. [Быстрый старт](#быстрый-старт)
+5. [Команды](#команды)
+6. [Настройки](#настройки)
+7. [Как работает sync](#как-работает-sync)
+8. [Раскладка объектов в бакете](#раскладка-объектов-в-бакете)
+9. [Что плагин делает со ссылками](#что-плагин-делает-со-ссылками)
+10. [PDF и PDF++](#pdf-и-pdf)
+11. [Cleanup: локальные сироты](#cleanup-локальные-сироты)
+12. [Cleanup S3: карантин](#cleanup-s3-карантин)
+13. [Status](#status)
+14. [Состояние плагина (data.json)](#состояние-плагина-datajson)
+15. [Локальный стенд RustFS](#локальный-стенд-rustfs)
+16. [Документация кода](#документация-кода)
+17. [Тесты](#тесты)
+18. [Диагностика проблем](#диагностика-проблем)
+19. [Ограничения и особенности](#ограничения-и-особенности)
+20. [Шифрование и приватность](#шифрование-и-приватность)
+21. [Планы](#планы)
+
+---
+
+## Что делает плагин
+
+Основной сценарий — «vault без картинок»: файлы лежат в объектном хранилище, а в заметках
+остаются обычные ссылки, которые Obsidian рендерит напрямую из бакета.
+
+1. Обходит заметки, находит ссылки на локальные вложения.
+2. Загружает файл в S3 под ключом, построенным из MD5 содержимого (дедупликация по контенту).
+3. Переписывает ссылку в заметке на публичный URL объекта.
+4. Удаляет локальную копию файла — но только **после** успешной записи заметки.
+5. Для PDF создаёт в vault маленький dummy-файл, чтобы работал PDF++.
+
+Дополнительно: уборка локальных сирот в `.trash`, уборка осиротевших объектов в S3-карантин,
+сводка по vault и бакету.
+
+---
+
+## Требования
+
+- Obsidian **1.4.0+**, только десктоп (`isDesktopOnly: true`).
+- S3-совместимое хранилище с доступом по Access key / Secret key.
+- Бакет **создан заранее** — плагин его не создаёт.
+- Для рендера картинок в заметках объекты должны быть доступны **анонимно на чтение**
+  (политика бакета / ACL). Иначе всё синхронизируется, но картинки не отрисуются.
+- Node.js 18+ и npm — только для сборки плагина.
+
+---
+
+## Установка
+
+### Сборка из исходников
 
 ```bash
-cd D:\Plugin_S3
+git clone https://github.com/ArturP1rozhkov/S3_plugin.git
+cd S3_plugin
 npm install
-npm run dev
+npm run build      # tsc --noEmit + esbuild (production, minified)
 ```
 
-Copy `main.js`, `manifest.json`, `styles.css` to  
-`<vault>/.obsidian/plugins/vault-s3-sync/` and enable in Obsidian settings.
+Готовый `main.js` появляется в корне репозитория.
 
-## PDF++ compatibility
+### Установка в vault
 
-PDF files are uploaded to S3. A small dummy `.pdf` file (containing only the S3 URL)  
-is created in the configured dummy folder. PDF++ reads it and opens the PDF from S3.
+Скопировать в `<vault>/.obsidian/plugins/vault-s3-sync/` три файла:
+
+```
+main.js
+manifest.json
+styles.css
+```
+
+Затем включить плагин в `Settings → Community plugins`.
+
+### ⚠️ Важно: `main.js` в `.gitignore`
+
+`main.js` — артефакт сборки, в репозиторий он не попадает. **После каждого `git pull`
+на новой машине плагин нужно пересобрать** и заново скопировать `main.js` в vault.
+
+Если этого не сделать, в vault останется старый бандл, и поведение будет отличаться от
+исходников — вплоть до «sync пишет 0 замен и 0 ошибок, а файлы не уезжают», потому что
+старые версии молча пропускали ссылки, которые не смогли разобрать.
+
+Проверить, что установлена свежая сборка, можно по наличию строк в `main.js`:
+
+```bash
+grep -c "Attachment not found in vault" main.js   # должно быть >= 1
+```
+
+### Режим разработки
+
+```bash
+npm run dev        # esbuild в watch-режиме, пересобирает main.js при изменениях
+```
+
+Obsidian подхватывает новый `main.js` после перезагрузки (`Ctrl+R`) или перезапуска плагина.
+
+---
+
+## Быстрый старт
+
+1. Создать бакет в хранилище и включить публичное чтение объектов (`s3:GetObject`).
+2. Заполнить настройки: **Endpoint**, **Public endpoint**, **Bucket**, **Access key**,
+   **Secret key**, **Region**.
+3. Прогнать `Ctrl+P → Sync: upload attachments to S3` на маленьком vault или на одной
+   заметке (`Sync current active note`).
+4. Открыть ссылку из заметки в браузере без авторизации — должен прийти `200`. Если `403`,
+   дело в политике бакета, а не в плагине.
+5. Проверить `Ctrl+P → Status: show vault & bucket statistics` — числа объектов и ссылок
+   должны сходиться.
+
+---
+
+## Команды
+
+| Команда (Command palette) | Что делает |
+|---|---|
+| **Sync: upload attachments to S3** | Полный проход: загружает вложения, переписывает ссылки, удаляет локальные копии |
+| **Sync current active note** | То же для одной открытой заметки (быстрая проверка настроек) |
+| **Cleanup: move local orphan files to trash** | Локальные вложения, на которые никто не ссылается → в папку `.trash` |
+| **Cleanup (dry run): preview orphan files without moving** | То же, но только показывает список |
+| **Cleanup S3: move orphan objects to quarantine** | Объекты в бакете, на которые никто не ссылается → в префикс `quarantine/` |
+| **Cleanup S3 (dry run): preview orphan objects without moving** | То же, но только показывает список |
+| **Status: show vault & bucket statistics** | Сводка: заметки, локальные вложения, ссылки, объекты, размеры |
+
+Иконка на ribbon (`cloud-upload`) просто напоминает, что работа идёт через Command palette.
+
+### Итоговая модалка Sync
+
+| Поле | Смысл |
+|---|---|
+| 📝 Notes processed | Сколько заметок просмотрено |
+| 🔗 Embeds replaced | Сколько ссылок переписано на S3 |
+| ⚠️ Skipped (0-byte files) | Пустые файлы: не загружаются, ссылка остаётся локальной |
+| ⚠️ Local files kept | Файл загружен, но локальную копию удалить не удалось (Obsidian держал файл) |
+| 🧹 Deferred deletions | Добитые удаления из очереди прошлых прогонов |
+| ⚠️ Errors | Ошибки загрузки; подробности в разделе Errors и в консоли |
+
+Раздел **Errors** появляется только при ошибках; в консоли (`Ctrl+Shift+I`) видно
+`[S3 Sync] …` строки, включая `Attachment not found in vault` для ссылок, файлов которых в
+vault нет.
+
+---
+
+## Настройки
+
+### S3-подключение
+
+| Настройка | По умолчанию | Назначение |
+|---|---|---|
+| **Endpoint** | `https://s3.cloud.ru` | S3 API. Для локального хранилища — `http://127.0.0.1:9000` |
+| **Public endpoint** | пусто | База для ссылок в заметках. Пусто = взять Endpoint |
+| **Public URL style** | `path` | `path` → `endpoint/bucket/key`; `virtual-host` → `endpoint/key` (бакет должен быть в хосте) |
+| **Bucket** | пусто | Имя бакета, должен существовать |
+| **Access key** | пусто | Ключ доступа |
+| **Secret key** | пусто | Секретный ключ |
+| **Region** | `ru-central-1` | Регион для подписи SigV4. RustFS/MinIO принимают любое значение |
+
+Примеры:
+
+```text
+# cloud.ru / SberCloud (публичные ссылки вида bucket.s3.cloud.ru/key)
+Endpoint        = https://s3.cloud.ru
+Public endpoint = https://my-bucket.s3.cloud.ru
+Public URL style= virtual-host
+Region          = ru-central-1
+
+# RustFS / MinIO в Docker на этой же машине
+Endpoint        = http://127.0.0.1:9000
+Public endpoint = http://127.0.0.1:9000
+Public URL style= path
+Region          = ru-central-1
+
+# AWS
+Endpoint        = https://s3.eu-central-1.amazonaws.com
+Public endpoint = https://my-bucket.s3.eu-central-1.amazonaws.com
+Public URL style= virtual-host
+Region          = eu-central-1
+```
+
+> Используйте `127.0.0.1`, а не `localhost`. Для `localhost` AWS SDK включает
+> virtual-host адресацию и пытается резолвить `<bucket>.localhost` → `ENOTFOUND`.
+> Для IP-адреса SDK автоматически переключается на path-style, и всё работает.
+
+### Кэш ссылок и имена объектов
+
+| Настройка | По умолчанию | Назначение |
+|---|---|---|
+| **Hash filenames in S3** | `включено` | Ключ = MD5 содержимого. Выключено — ключ = исходное имя файла |
+| **Image width (px)** | `550` | Ширина, подставляемая в `![\|W](url)` для картинок |
+| **S3 quarantine folder** | `quarantine` | Префикс карантина для Cleanup S3 |
+
+### Структура vault
+
+| Настройка | По умолчанию | Назначение |
+|---|---|---|
+| **Attachment folders** | `Картинки`, `Attachments`, `Файлы` | Папки, где плагин ищет файлы по имени |
+| **PDF dummy folder** | `Файлы` | Куда складывать dummy-PDF (лучше отдельная папка, не папка вложений) |
+| **Ignore folders** | `.git`, `.obsidian`, `.trash`, `.vault_tools` | Заметки из этих папок не обрабатываются |
+| **Ignore files** | `.gitignore`, `*.json`, `*.yaml`, `*.yml`, `*.css`, `*.js`, `database*`, … | Не считаются сиротами в Cleanup |
+| **Trash folder** | `.trash` | Куда Cleanup переносит локальные сироты |
+| **Download external images** | `выключено (locked)` | Заглушка: внешние ссылки не скачиваются принципиально |
+
+Настройки, которые есть в `data.json`, но не выводятся в UI: `folderMap` (раскладка по
+папкам в бакете), `quarantineRetentionDays` (14 дней), `imageMaxPx`, `trashRetentionDays`,
+`externalImageTimeoutSec`, `maxExternalAttempts` — последние четыре зарезервированы.
+
+---
+
+## Как работает sync
+
+`cmdSync` (`src/engine/sync.ts`) — полный проход по заметкам; `processMdFile` — обработка
+одной заметки.
+
+```text
+cmdSync
+ ├─ проверка настроек (bucket/accessKey/secretKey)
+ ├─ собрать .md файлы, отфильтровать ignoreFolders
+ ├─ flushPendingDeletions   — добить удаления прошлых прогонов
+ └─ для каждой заметки → processMdFile
+      ├─ прочитать содержимое
+      ├─ нормализовать форму ссылок, которые уже указывают на наш S3
+      │    (например ![name](…mp4) → <video src=…>)
+      ├─ разобрать ссылки на вложения
+      └─ для каждой ссылки:
+           ├─ уже наш S3 / внешняя ссылка → пропустить
+           ├─ найти TFile: точный путь → attachment folders → по имени во всём vault
+           ├─ dummy-PDF → пропустить
+           ├─ uploadFile:
+           │    ├─ MD5 содержимого → ключ (media/docs/files + hash + ext)
+           │    ├─ HeadObject: если размер и ETag совпали → уже загружено, не грузим
+           │    └─ PutObject (Content-Type + метаданные)
+           ├─ сформировать замену ссылки (см. ниже)
+           └─ запомнить файл в список на удаление
+      ├─ записать заметку (только если были замены)
+      └─ удалить локальные файлы, проверив что они реально исчезли
+           (не удалось → очередь pendingDeletions + «Local files kept»)
+```
+
+Детали, которые важны на практике:
+
+- **Повторный запуск безопасен.** Уже загруженные файлы отсекаются по `HeadObject`
+  (размер + ETag), ссылки, начинающиеся с `publicEndpoint` / `endpoint/bucket`, плагин
+  считает своими и не трогает.
+- **Удаление только после записи заметки.** Если заметка не записалась, локальные файлы
+  остаются — «потерять файл и не получить ссылку» невозможно.
+- **Проверка удаления.** После `vault.delete` плагин проверяет, что файла нет (через
+  `adapter.exists` и индекс), делает вторую попытку через `adapter.remove`, и только потом
+  ставит файл в очередь `pendingDeletions`. Очередь добивается в начале следующего sync и
+  ещё раз в конце прогона.
+- **Повтор сетевой операции.** `withRetry` (2 попытки, пауза 300 мс) вокруг `HeadObject` и
+  `PutObject` — на случай разового обрыва.
+- **Внешние ссылки** (`http://`, `https://`, не наши) плагин **никогда** не скачивает и не
+  переписывает — это осознанная политика проекта.
+
+---
+
+## Раскладка объектов в бакете
+
+Ключ строится в `src/engine/fileClassifier.ts`:
+
+```text
+<hashFilenames ? "<md5><ext>" : "<имя файла>">
+key = folderMap[fileType] + "/" + filename
+```
+
+`folderMap` по умолчанию:
+
+| Тип | Расширения | Папка |
+|---|---|---|
+| image | png, jpg, jpeg, gif, webp, svg, bmp, tiff, ico | `media/` |
+| audio | mp3, m4a, ogg, wav, flac, 3gp | `media/` |
+| video | mp4, mov, avi, mkv, webm, m4v, ogv | `media/` |
+| pdf | pdf | `docs/` |
+| doc | fb2, epub, djvu, doc(x), xls(x), ppt(x), txt | `docs/` |
+| archive | zip, tar, gz, 7z, rar | `files/` |
+| other | всё остальное | `files/` |
+
+Правила:
+
+- Расширения-синонимы нормализуются: `.jpeg` → `.jpg`, поэтому один и тот же контент не
+  уезжает дважды как `…<md5>.jpg` и `…<md5>.jpeg`.
+- Одинаковое содержимое = один объект, сколько бы заметок на него ни ссылалось.
+- Метаданные каждого объекта (`x-amz-meta-*`):
+
+  | Ключ | Значение |
+  |---|---|
+  | `source-vault` | имя vault |
+  | `uploaded-by` | `vault-s3-sync` |
+  | `original-name` | исходное имя файла (URL-encoded) |
+  | `file-type` | `image` / `video` / `audio` / `pdf` / `doc` / `archive` / `other` |
+  | `uploaded-at` | ISO-время загрузки |
+  | `source-note` | путь заметки (URL-encoded) |
+
+---
+
+## Что плагин делает со ссылками
+
+| Было в заметке | Стало |
+|---|---|
+| `![[photo.jpg]]` / `[[photo.jpg]]` | `![\|750](https://…/media/<md5>.jpg)` |
+| `![alt](photo.jpg)` | `![\|750](https://…/media/<md5>.jpg)` |
+| `![[clip.mp4]]`, `[[clip.mp4]]`, `![](clip.mp4)` | `<video src="https://…/media/<md5>.mp4" controls></video>` |
+| аудио (mp3, m4a, ogg, wav, flac, 3gp) | `<audio src="…" controls></audio>` |
+| PDF в любой форме (`![[doc.pdf]]`, `[[doc.pdf]]`, `![](doc.pdf)`) | `![[doc.pdf]]` — **на dummy-файл** в `pdfDummyFolder` |
+| doc/archive (`![[file.docx]]`) | `[file](https://…/docs/<md5>.docx)` |
+| `<img src="local.png">` | заменяется только `src` |
+
+Ширина для картинок берётся из настройки **Image width (px)**, но если в исходной
+wiki-ссылки был размер (`![[photo.jpg|300]]` или `![[photo.jpg|300x200]]`), используется он.
+
+---
+
+## PDF и PDF++
+
+PDF нельзя отрендерить «прямо из бакета» — PDF++ работает с локальным файлом. Поэтому
+плагин применяет схему dummy-файла:
+
+1. Настоящий PDF загружается в `docs/<md5>.pdf`.
+2. В `pdfDummyFolder` создаётся маленький файл (десятки байт) с тем же именем:
+
+   ```text
+   https://my-bucket.s3.cloud.ru/docs/<md5>.pdf
+   # vault-s3-sync:md5=<md5>
+   ```
+
+3. Ссылка в заметке указывает на этот dummy: `![[doc.pdf]]`.
+4. PDF++ читает dummy, находит в нём URL и открывает настоящий PDF из S3.
+
+Свойства схемы:
+
+- Dummy ищется **по MD5 внутри файла**, а не по имени, поэтому переименование dummy в vault
+  ничего не ломает. При совпадении MD5 разные исходные PDF с одинаковым содержимым
+  переиспользуют один dummy.
+- `isDummyPdf` считает dummy'ом только файл < 4096 байт, который не начинается с `%PDF-` и
+  содержит либо строку `# vault-s3-sync:md5=…`, либо URL на `.pdf` в первой строке. Поэтому
+  настоящий бинарный PDF никогда не будет принят за dummy и не «съеден» синком.
+- Dummy-файлы защищены от Cleanup: на них есть ссылки в заметках.
+- Dummy лучше держать в отдельной папке (`PDF`), а не в папке вложений: иначе имена dummy и
+  настоящих PDF конфликтуют и появляются суффиксы `-2`.
+
+---
+
+## Cleanup: локальные сироты
+
+`Cleanup` (`src/engine/cleanup.ts`) переносит в `trashFolder` (`.trash`) файлы из
+`attachmentFolders` + `pdfDummyFolder`, на которые **никто не ссылается**.
+
+Как определяется «ссылается»:
+
+- `metadataCache.embeds` и `metadataCache.links` — wiki-ссылки и embed'ы;
+- плюс разбор текста (`parseAllRefs`) — HTML-теги `<img>/<video>/<audio>/<source>` и
+  markdown-ссылки, потому что Obsidian не кэширует содержимое `src` в HTML;
+- ссылки, которые уже указывают на наш S3, файл от удаления **не** защищают (это ссылка на
+  объект, а не на локальный файл);
+- файлы, совпадающие с `ignoreFiles`, не считаются сиротами;
+- учитываются только файлы с расширениями из `ATTACHMENT_EXT`.
+
+Перемещение делается с тройным резервом: `vault.rename` → `adapter.rename` →
+`copy + delete`, и каждый шаг проверяет, что файл действительно исчез. Имена в `.trash`
+делаются уникальными (`name 2.ext`), существующие файлы не перезаписываются. Если сирот нет,
+модалка так и говорит — подтверждения не спрашивает.
+
+`Cleanup (dry run)` показывает список и размеры, ничего не перемещая.
+
+---
+
+## Cleanup S3: карантин
+
+`Cleanup S3` (`src/engine/cleanupS3.ts`) ищет в бакете объекты, на которые нет ссылок в vault,
+и переносит их в префикс `quarantine/` (копирование + удаление исходного ключа).
+
+- «Свои» URL определяются по префиксу, который строится из **Public endpoint**:
+  `virtual-host` → `publicEndpoint/`, `path` → `publicEndpoint/bucket/`.
+  Поэтому при неверном `Public endpoint` (опечатка, плейсхолдер) все объекты выглядят
+  сиротами — это ложная тревога, а не состояние бакета.
+- Ключи собираются из текста заметок (URL с этим префиксом) и из dummy-PDF.
+- Объекты внутри `quarantine/` не считаются сиротами.
+- При перемещении объекты старше `quarantineRetentionDays` (14 дней) удаляются из карантина.
+- Имя в карантине: `quarantine/<исходный ключ с "/" → "_">`, например
+  `quarantine/media_abc123.jpg`. Вернуть объект можно обратным копированием.
+- `Cleanup S3 (dry run)` показывает список и суммарный размер.
+
+---
+
+## Status
+
+Показывает:
+
+- количество `.md` файлов (без `ignoreFolders`);
+- локальные вложения в `attachmentFolders` и их суммарный размер;
+- количество ссылок на S3 в заметках (по префиксу `publicEndpoint`);
+- количество и суммарный размер объектов в бакете, разбивка по первому сегменту ключа;
+- текущую папку `.trash` и префикс карантина.
+
+Если к S3 подключиться не удалось, вместо цифр будет `⚠️ Cannot connect to S3`.
+
+---
+
+## Состояние плагина (data.json)
+
+Лежит в `<vault>/.obsidian/plugins/vault-s3-sync/data.json` (в `.gitignore` репозитория),
+хранит и настройки, и состояние:
+
+```jsonc
+{
+  "s3": { /* настройки */ },
+  "attachmentFolders": ["…"],
+  "syncState": {
+    "processed": {
+      // путь файла → когда и куда загружен
+      "Telegram/media/photo.jpg": {
+        "hash": "<md5>", "s3url": "https://…/media/<md5>.jpg", "processedAt": "ISO"
+      }
+    },
+    "failedExternal": { /* legacy: попытки скачивания внешних ссылок */ },
+    "pendingDeletions": [
+      // файлы, которые не удалось удалить сразу (Obsidian держал дескриптор)
+      { "path": "…", "size": 123, "mtime": 1712345678901 }
+    ]
+  }
+}
+```
+
+- `processed` — журнал загрузок. **Не используется для пропуска файлов** при синке: запись в
+  журнале означает «файл уже загружали», но не «ссылка уже переписана». Пропуск по журналу
+  раньше приводил к заметкам со ссылками на уже удалённые файлы.
+- `pendingDeletions` — очередь отложенных удалений, добивается при следующем прогоне.
+- `failedExternal` — наследие версий, которые умели скачивать внешние ссылки; сейчас не
+  используется (внешние ссылки не скачиваются).
+
+При смене хранилища старые записи журнала не мешают, но и не помогают: ссылки в заметках
+придётся привести к новому хосту отдельно (см. раздел про переезд в конце).
+
+---
+
+## Локальный стенд RustFS
+
+В репозитории лежит `compose.rustfs.yml` — поднимает RustFS с уже правильными для плагина
+настройками (порты, ключи, CORS):
+
+```bash
+docker compose -f compose.rustfs.yml up -d
+```
+
+```yaml
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: obsidian-s3-test
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # web-консоль
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_ACCESS_KEY: local-dev-access
+      RUSTFS_SECRET_KEY: local-dev-secret-change-me
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CORS_ALLOWED_ORIGINS: "*"
+    volumes:
+      - rustfs_data:/data
+```
+
+Три вещи, без которых локальный стенд не заведётся:
+
+1. **Порты должны быть опубликованы.** `docker ps` без `->9000` означает, что Obsidian
+   физически не достучится до хранилища (`ECONNREFUSED`).
+2. **`RUSTFS_CORS_ALLOWED_ORIGINS`** нужен обязательно: плагин делает `fetch` из рендерера
+   Electron (origin `app://obsidian.md`), а RustFS/MinIO по умолчанию CORS-заголовки не
+   отдают — получите `TypeError: Failed to fetch`.
+3. **Endpoint — `http://127.0.0.1:9000`**, не `localhost` (см. выше).
+
+Консоль хранилища: <http://127.0.0.1:9001>. Бакет создаётся вручную; для рендера картинок
+нужна политика анонимного чтения:
+
+```json
+{"Version":"2012-10-17","Statement":[{
+  "Effect":"Allow","Principal":{"AWS":["*"]},
+  "Action":["s3:GetObject"],
+  "Resource":["arn:aws:s3:::test/*"]}]}
+```
+
+Быстрая проверка публичного доступа:
+
+```bash
+curl -sI http://127.0.0.1:9000/test/media/hello.png   # ждём 200
+```
+
+---
+
+## Документация кода
+
+Исходники — TypeScript в `src/`, сборка esbuild в один CommonJS `main.js`, внешние
+зависимости — `obsidian` и CodeMirror-пакеты (см. `esbuild.config.mjs`).
+
+### Карта модулей
+
+| Модуль | Ответственность | Ключевые экспорты |
+|---|---|---|
+| `src/main.ts` | Точка входа плагина, регистрация команд, миграция настроек, загрузка/сохранение | `migrateSettings`, `VaultS3Plugin` |
+| `src/settings.ts` | Схема настроек, дефолты, вкладка настроек | `S3Config`, `VaultS3Settings`, `DEFAULT_SETTINGS`, `VaultS3SettingTab` |
+| `src/state.ts` | Типы состояния vault и хелперы журнала | `SyncState`, `markProcessed`, `queueDeletion`, `isAlreadyProcessed`, `shouldSkipExternal` |
+| `src/s3Client.ts` | Фабрика S3-клиента и операции | `createS3Client`, `uploadBuffer`, `headObject`, `listAllObjects`, `moveObject`, `deleteObject`, `publicUrl` |
+| `src/engine/sync.ts` | Основной пайплайн загрузки | `cmdSync`, `processMdFile`, `SyncLogger` |
+| `src/engine/linkParser.ts` | Разбор и генерация ссылок | `parseAllRefs`, `parseAllAttachmentRefs`, `splitRef`, `refExt`, `refFilename`, `isExternalRef`, `isAlreadyS3Ref`, `canonicalMediaTag`, `makeReplacement` |
+| `src/engine/fileClassifier.ts` | Наборы расширений, тип файла, ключ объекта | `ATTACHMENT_EXT`, `canonicalExt`, `fileType`, `s3Key`, `DEFAULT_FOLDER_MAP` |
+| `src/engine/md5.ts` | MD5 для ArrayBuffer/Uint8Array (без Node API) | `md5Buffer` |
+| `src/engine/pdfDummy.ts` | Жизненный цикл dummy-PDF | `ensurePdfDummy`, `isDummyPdf`, `extractPdfUrl` |
+| `src/engine/cleanup.ts` | Локальные сироты → `.trash` | `cmdCleanup` |
+| `src/engine/cleanupS3.ts` | Сироты в бакете → карантин | `cmdCleanupS3` |
+| `src/engine/status.ts` | UI модалки результата + сводка | `ResultModal`, `ResultData`, `cmdStatus` |
+
+### Разбор ссылок (`linkParser.ts`)
+
+Порядок важен, потому что формы ссылок пересекаются:
+
+1. wiki-embed: `![[file]]`, `![[file|750]]`, `![[file|300x200]]`;
+2. wiki-link: `[[file]]` (диапазоны, занятые embed'ами, пропускаются);
+3. markdown: `![alt](url)` и `[text](url)`;
+4. HTML: `<img src>`, `<video src>`, `<audio src>`, `<source src>`.
+
+`splitRef` разделяет `path` / `query` / `anchor` **до** декодирования `%20`, чтобы `%23` в
+имени файла не превратился в якорь. `isAttachmentCandidate` отбрасывает внешние ссылки,
+`.md`-ссылки и ссылки на блоки/заголовки, после чего проверяет расширение по
+`ATTACHMENT_EXT`.
+
+### Конвенции проекта
+
+- Комментарии в коде — по-русски, и они объясняют **почему**, а не что: каждая нетривиальная
+  ветка сопровождается описанием реального случая, из-за которого она появилась.
+- Любой вывод пользователю — через `ResultModal` (`src/engine/status.ts`), а не `Notice`,
+  кроме коротких служебных сообщений.
+- Логирование — через интерфейс `SyncLogger` (`info/warn/error`), чтобы движок можно было
+  прогонять в тестах без Obsidian.
+- Операции должны быть идемпотентными: повторный запуск команды не создаёт дублей ни в
+  бакете, ни в заметках.
+- Разрушительные действия (удаление локального файла, перемещение в карантин) всегда
+  проверяют результат и никогда не выполняются «на веру».
+
+### Поток данных
+
+```text
+Obsidian Vault (TFile)
+      │  readBinary / read
+      ▼
+processMdFile ── parseAllRefs ──► ParsedRef[]
+      │                              │
+      │                              ├─ уже S3 / внешняя → skip
+      │                              └─ локальная → resolveLocalRef → TFile
+      ▼
+uploadFile: md5Buffer → key → HeadObject → PutObject
+      │
+      ├─► S3 bucket (media/ docs/ files/)
+      └─► makeReplacement → новый текст заметки → vault.modify
+                                        │
+                                        └─► удаление локального файла
+                                            (или pendingDeletions)
+```
+
+---
+
+## Тесты
+
+```bash
+npm test          # vitest run, тесты в tests/unit
+npm run test:watch
+```
+
+| Файл | Что проверяет |
+|---|---|
+| `linkParser.test.ts` | Разбор всех форм ссылок, размеры, якоря, внешние ссылки |
+| `syncFormats.test.ts` | Замены для картинок/видео/аудио/PDF/doc, стабильность формата |
+| `syncEmptyFile.test.ts` | Пустые файлы не загружаются, ссылки не переписываются |
+| `pdfDummy.test.ts` | Создание/переиспользование dummy, защита от бинарных PDF |
+| `cleanup.test.ts` | Определение сирот с учётом всех источников ссылок |
+| `fileClassifier.test.ts` | Расширения, типы, ключи, нормализация `.jpeg` |
+| `md5.test.ts` | MD5 на ArrayBuffer и Uint8Array |
+| `s3Client.test.ts` | Построение публичных URL (path / virtual-host) |
+| `loadSettingsMigration.test.ts` | Миграции старых `data.json` |
+
+Тесты не требуют Obsidian: модуль `obsidian` мокается через `vi.mock` в каждом файле.
+
+---
+
+## Диагностика проблем
+
+| Симптом | Причина | Что делать |
+|---|---|---|
+| `TypeError: Failed to fetch`, объекты не появляются | CORS: хранилище не отдаёт `Access-Control-Allow-Origin` для `app://obsidian.md` | Разрешить CORS на бакете (RustFS: `RUSTFS_CORS_ALLOWED_ORIGINS=*`) |
+| `ECONNREFUSED` | Порт не опубликован / контейнер не запущен / неверный порт | Проверить `docker ps`: должно быть `127.0.0.1:9000->9000/tcp` |
+| `ENOTFOUND <bucket>.localhost` | Нет endpoint'а, начинающегося с `localhost`: SDK включил virtual-host | Заменить `localhost` на `127.0.0.1` |
+| `403 InvalidAccessKeyId` / `SignatureDoesNotMatch` | Ключи от другого хранилища или неверный регион | Перепроверить ключи и Region |
+| `NoSuchBucket` | Бакет не создан или имя с опечаткой | Создать бакет в консоли |
+| Синк пишет `0 замен, 0 ошибок`, файлы остаются | Установлен старый `main.js` (он молча пропускал неразобранные ссылки) | Пересобрать `npm run build` и скопировать `main.js` в vault |
+| Картинки не отрисовываются, но объекты в бакете есть | Бакет приватный | Включить анонимное чтение (`s3:GetObject`) в политике/ACL |
+| `Cleanup S3` показывает все объекты сиротами | `Public endpoint` не совпадает с хостом в ссылках (опечатка, плейсхолдер) | Исправить `Public endpoint` и `Public URL style` |
+| Ссылки ведут на `<bucket>.s3.cloud.ru` | В настройку вписан плейсхолдер вместо имени бакета | Заменить на реальное имя бакета |
+| `Attachment not found in vault: "…"` в консоли | Ссылка есть, файла в vault нет | Восстановить файл из бэкапа или убрать ссылку |
+| Файл загружен, но локальный остался | Obsidian держал дескриптор | Повторить sync (очередь `pendingDeletions`) или `Cleanup` |
+| `Skipped (0-byte files): N` | Файлы нулевого размера | Заменить файл или удалить ссылку — плагин такие не грузит |
+
+---
+
+## Ограничения и особенности
+
+- **Только десктоп.** Плагин использует Node-возможности и не рассчитан на мобильный Obsidian.
+- **Внешние ссылки не скачиваются** — это политика проекта, а не недоработка.
+- **Бакет и его политика — на вас.** Плагин не создаёт бакеты и не настраивает публичный
+  доступ.
+- **Один vault — одно хранилище.** Смена `Endpoint`/`Bucket` не мигрирует уже записанные
+  ссылки: старые URL останутся в заметках, а локальных файлов к этому моменту уже нет.
+  Для переезда: перенести объекты в новый бакет с теми же ключами (они MD5-имена) и заменить
+  в заметках хост старых ссылок на новый.
+- **Нет прогресс-бара** — только `Notice` каждые 50 заметок и итоговая модалка.
+- **Загрузка последовательная**, по файлу за раз; на больших vault прогон занимает время.
+- **`processed` не влияет на пропуск** файлов (см. раздел про state).
+- **Dummy-PDF** — компромисс ради PDF++: в vault остаются файлы нулевого размера, зато PDF
+  открывается из S3.
+
+---
+
+## Шифрование и приватность
+
+### Что можно включить без последствий для рендера
+
+- **Server-side encryption, управляемая провайдером (SSE-S3 / AES256).** Шифрование и
+  расшифровка происходят на стороне хранилища, `GET` по публичному URL возвращает обычный
+  объект. Ссылки в заметках, `Content-Type` и рендер в Obsidian **не меняются**. Для
+  публичных бакетов это самый безопасный вариант: данные шифруются на дисках провайдера,
+  доступ по ссылке остаётся как есть.
+- **Default encryption на бакете.** Плагин ничего не знает о шифровании: ключи объектов —
+  MD5 содержимого, они не зависят от шифрования, дедупликация сохраняется.
+- **Отдельный «приватный» бакет для чувствительных вложений.** Плагин поддерживает только
+  один бакет на vault, но можно держать два vault'а.
+
+### Что сломает рендер
+
+- **SSE-KMS с ключом, к которому у анонимного читателя нет `kms:Decrypt`.** Публичный `GET`
+  начнёт возвращать `403`, и картинки перестанут отрисовываться, хотя синк будет «успешным».
+  Вариант применения: приватный бакет + presigned URL (см. ниже).
+- **Клиентское шифрование (плагин шифрует перед загрузкой).** Прямая ссылка отдаст
+  шифротекст: `<img>`/`<video>` не отрендерятся, PDF++ тоже. Такая схема требует отдельного
+  просмотрщика/прокси, который расшифрует объект на лету, и меняет модель дедупликации
+  (ключ станет хешем шифротекста).
+- **Presigned URL.** Технически рендер работает, но у ссылки есть срок жизни: заметка
+  «протухает» без перезаписи. Для долгоживущих заметок не подходит.
+
+### Практическая рекомендация
+
+Для публичного vault — SSE-S3 (или «шифрование на стороне провайдера» в терминах консоли)
+плюс политика `s3:GetObject` только на нужные префиксы (`media/*`, `docs/*`, `files/*`),
+листинг бакета анонимно закрыт. Для приватного — отдельное хранилище и осознанное решение,
+что рендер по прямой ссылке работать не будет.
+
+---
+
+## Планы
+
+- Настройка шифрования из UI (`x-amz-server-side-encryption` при `PutObject`) и проверка, что
+  выбранный режим не ломает публичный рендер.
+- Поддержка presigned URL как альтернативы публичным ссылкам (с явным предупреждением о
+  сроке жизни).
+- Встроенный «Test connection» в настройках: проверка endpoint, ключей, бакета и прав на
+  запись с человекочитаемой причиной ошибки.
+- Свой HTTP-транспорт через `requestUrl` Obsidian, чтобы не зависеть от CORS на хранилище.
+- Параллельная загрузка и прогресс-бар для больших vault.
+- Типизация ошибок S3 (`ECONNREFUSED` / `ENOTFOUND` / `403` / `NoSuchBucket`) в
+  человекочитаемые подсказки прямо в модалке.
