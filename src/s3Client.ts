@@ -1,6 +1,7 @@
 import {
   S3Client,
   PutObjectCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   CopyObjectCommand,
@@ -105,4 +106,35 @@ export async function deleteObject(
   key: string
 ): Promise<void> {
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+}
+
+/**
+ * Скачивает объект целиком в память вместе с метаданными.
+ *
+ * Используется командой Restore: это вложения заметок, они и так грузятся в
+ * память при загрузке, поэтому потоковая запись здесь не нужна. Метаданные
+ * нужны, чтобы восстановить исходное имя файла (`original-name`).
+ */
+export interface DownloadedObject {
+  bytes: Uint8Array;
+  contentType?: string;
+  etag?: string;
+  metadata: Record<string, string>;
+}
+
+export async function downloadObject(
+  client: S3Client,
+  bucket: string,
+  key: string
+): Promise<DownloadedObject> {
+  const res = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  if (!res.Body) throw new Error(`Empty response body for key "${key}"`);
+  const bytes = await res.Body.transformToByteArray();
+  if (bytes.byteLength === 0) throw new Error(`Object "${key}" is empty`);
+  return {
+    bytes,
+    contentType: res.ContentType,
+    etag: res.ETag,
+    metadata: res.Metadata ?? {},
+  };
 }

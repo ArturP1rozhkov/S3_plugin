@@ -2,6 +2,7 @@
 
 import { App, Modal, Notice, TFile, normalizePath } from "obsidian";
 import type { VaultS3Settings } from "../settings";
+import { normalizeFolderPath } from "../settings";
 import type { SyncState } from "../state";
 import {
   parseAllRefs,
@@ -10,6 +11,7 @@ import {
   refExt,
   refFilename,
 } from "./linkParser";
+import { resolveRefFile } from "./resolveFile";
 import { ATTACHMENT_EXT } from "./fileClassifier";
 import { ResultModal, type ResultData } from "./status";
 
@@ -52,11 +54,37 @@ function iconForFile(name: string): string {
 // локальный attachment всё ещё считается валидной ссылкой, поэтому md-link
 // и wiki-link остаются в referenced set.
 
-async function collectReferencedFilenames(
+interface ReferencedFiles {
+  /** Пути конкретных файлов, на которые указывают ссылки. */
+  paths: Set<string>;
+  /** Имена ссылок, которые не удалось сопоставить с файлом (индекс отстаёт). */
+  names: Set<string>;
+}
+
+async function collectReferencedPaths(
   app: App,
   settings: VaultS3Settings
-): Promise<Set<string>> {
-  const referenced = new Set<string>();
+): Promise<ReferencedFiles> {
+  const paths = new Set<string>();
+  const names = new Set<string>();
+
+  // Резолвим ссылку в конкретный файл: защищён должен быть именно он, а не
+  // любой файл с тем же именем. Иначе скачанная копия dummy (TRAIN.pdf) в
+  // папке вложений считалась бы используемой и никогда не убиралась.
+  // Если файл не нашёлся — запоминаем имя, чтобы не удалить его по ошибке,
+  // когда индекс vault отстаёт.
+  const protect = (ref: string): void => {
+    const file = resolveRefFile(app, ref, {
+      attachmentFolders: settings.attachmentFolders,
+      pdfDummyFolder: settings.pdfDummyFolder,
+    });
+    if (file) paths.add(file.path);
+    else names.add(refFilename(ref));
+  };
+
+  const isOurLink = (ref: string): boolean =>
+    !isExternalRef(ref) &&
+    !isAlreadyS3Ref(ref, settings.s3.publicEndpoint, settings.s3.endpoint, settings.s3.bucket);
 
   const mdFiles = app.vault.getMarkdownFiles().filter(
     (f) => !isIgnored(f.path, settings.ignoreFolders)
@@ -67,13 +95,13 @@ async function collectReferencedFilenames(
     const cache = app.metadataCache.getFileCache(md);
 
     for (const embed of cache?.embeds ?? []) {
-      const e = refExt(embed.link);
-      if (ATTACHMENT_EXT.has(e)) referenced.add(refFilename(embed.link));
+      if (!ATTACHMENT_EXT.has(refExt(embed.link)) || !isOurLink(embed.link)) continue;
+      protect(embed.link);
     }
 
     for (const link of cache?.links ?? []) {
-      const e = refExt(link.link);
-      if (ATTACHMENT_EXT.has(e)) referenced.add(refFilename(link.link));
+      if (!ATTACHMENT_EXT.has(refExt(link.link)) || !isOurLink(link.link)) continue;
+      protect(link.link);
     }
 
     // 2. Из текста — HTML-теги и markdown-ссылки
@@ -93,16 +121,15 @@ async function collectReferencedFilenames(
          kind === "html-source" ||
          kind === "md-embed" || kind === "md-link" ||
          kind === "wiki-embed" || kind === "wiki-link") &&
-        !isExternalRef(ref) &&
-        !isAlreadyS3Ref(ref, settings.s3.publicEndpoint, settings.s3.endpoint, settings.s3.bucket)
+        ATTACHMENT_EXT.has(refExt(ref)) &&
+        isOurLink(ref)
       ) {
-        const e = refExt(ref);
-        if (ATTACHMENT_EXT.has(e)) referenced.add(refFilename(ref));
+        protect(ref);
       }
     }
   }
 
-  return referenced;
+  return { paths, names };
 }
 
 // ── Перемещение в trash ───────────────────────────────────────────────────────
@@ -211,9 +238,11 @@ export async function cmdCleanup(
 
   log.info(dryRun ? "CLEANUP local — DRY RUN" : "CLEANUP local — started");
 
-  // 1. Собираем все referenced filenames
-  const referenced = await collectReferencedFilenames(app, settings);
-  log.info(`Referenced attachment filenames: ${referenced.size}`);
+  // 1. Собираем пути файлов, на которые реально ссылаются заметки
+  const referenced = await collectReferencedPaths(app, settings);
+  log.info(
+    `Referenced attachment files: ${referenced.paths.size}, unresolved names: ${referenced.names.size}`
+  );
 
   // 2. Обходим attachment folders + pdfDummyFolder и ищем orphans.
   // pdfDummyFolder сканируем явно, даже если он не указан в attachmentFolders,
@@ -229,7 +258,11 @@ export async function cmdCleanup(
       if (!file.path.startsWith(folderName + "/")) continue;
       if (!ATTACHMENT_EXT.has(refExt(file.name))) continue;
       if (isIgnoredFile(file.name, settings.ignoreFiles ?? [])) continue;
-      if (!referenced.has(file.name)) {
+      // Защищаем конкретный файл, а не всех тёзок: иначе скачанная копия
+      // dummy (или любая другая копия с тем же именем) никогда не уберётся.
+      // Исключение — имена, которые не удалось сопоставить с файлом: их не
+      // трогаем, чтобы не удалить вложение при отстающем индексе.
+      if (!referenced.paths.has(file.path) && !referenced.names.has(file.name)) {
         orphans.push(file);
       }
     }
@@ -255,7 +288,7 @@ export async function cmdCleanup(
           title: "",
           rows: {
             "🔍 Folders scanned": [...foldersToScan].join(", "),
-            "📎 Attachments referenced by notes": String(referenced.size),
+            "📎 Attachments referenced by notes": String(referenced.paths.size),
           },
         },
       ],

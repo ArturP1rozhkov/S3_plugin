@@ -6,6 +6,7 @@ import { cmdSync } from "./engine/sync";
 import { cmdCleanup } from "./engine/cleanup";
 import { cmdCleanupS3 } from "./engine/cleanupS3";
 import { cmdStatus } from "./engine/status";
+import { RestoreModal } from "./engine/restoreModal";
 
 export function migrateSettings(data: unknown): VaultS3Settings {
   const incoming = (data ?? {}) as Partial<VaultS3Settings>;
@@ -81,6 +82,21 @@ export default class VaultS3Plugin extends Plugin {
             sections: [{ title: "", rows: { "⚠️ Error": String(err) }, error: true }],
           }).open();
         }
+      },
+    });
+
+    // Обратная операция к sync: скачать объекты текущей заметки в локальную
+    // папку. Ничего в заметке и в бакете не меняет — только читает и сохраняет.
+    this.addCommand({
+      id: "s3-restore-active-note",
+      name: "Restore: download current note's objects to a local folder",
+      callback: async () => {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile || activeFile.extension.toLowerCase() !== "md") {
+          new Notice("Vault S3 Sync: open a Markdown note first.");
+          return;
+        }
+        new RestoreModal(this.app, this, activeFile).open();
       },
     });
 

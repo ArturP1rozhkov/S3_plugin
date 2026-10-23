@@ -26,6 +26,8 @@ export interface ResultData {
   title: string;
   icon?: string;
   subtitle?: string;
+  /** Уточняющая строка под подзаголовком: например, куда сохранены файлы. */
+  hint?: string;
   sections: ResultSection[];
   lists?: ResultList[];
 }
@@ -78,6 +80,10 @@ export class ResultModal extends Modal {
     });
     if (this.data.subtitle) {
       header.createEl("div", { cls: "s3sync-result-subtitle", text: this.data.subtitle });
+    }
+    // Пояснение под заголовком: куда сохранены файлы, что осталось локально и т.п.
+    if (this.data.hint) {
+      header.createEl("div", { cls: "s3sync-result-hint", text: this.data.hint });
     }
 
     for (const section of this.data.sections) {

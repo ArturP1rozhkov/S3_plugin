@@ -98,7 +98,13 @@ async function allocateDummyPath(
   const baseName = filename.replace(/\.pdf$/i, "");
   let counter = 2;
 
-  while (true) {
+  // Ограничиваем перебор: адаптер может врать (например, exists() возвращает
+  // true для всего), и раньше это превращалось в бесконечный цикл, который
+  // вешал Obsidian. После лимита используем детерминированное имя — оно
+  // уникально настолько, что коллизия практически невозможна.
+  const MAX_ATTEMPTS = 100;
+
+  while (counter <= MAX_ATTEMPTS) {
     const existing = app.vault.getAbstractFileByPath(candidatePath);
 
     if (!existing) {
@@ -126,6 +132,16 @@ async function allocateDummyPath(
     candidatePath = normalizePath(`${dummyFolder}/${baseName}-${counter}.pdf`);
     counter++;
   }
+
+  // Перебор не дал результата — пишем по имени с хешем. Такой файл не совпадёт
+  // ни с одним существующим dummy (имя уникально для содержимого).
+  const fallbackPath = normalizePath(`${dummyFolder}/${baseName}-${fileHash.slice(0, 8)}.pdf`);
+  const fallbackExists = app.vault.getAbstractFileByPath(fallbackPath);
+  const fallbackOnDisk = fallbackExists ? true : await app.vault.adapter?.exists?.(fallbackPath);
+  if (!fallbackOnDisk) {
+    await app.vault.create(fallbackPath, canonicalContent);
+  }
+  return fallbackPath;
 }
 
 /** Create a dummy .pdf file containing the S3 URL (for PDF++ plugin).

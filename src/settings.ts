@@ -23,6 +23,10 @@ export interface VaultS3Settings {
   ignoreFolders: string[];
   ignoreFiles: string[];
   pdfDummyFolder: string;
+  /** Куда команда «Restore current note» складывает скачанные объекты. */
+  restoreFolder: string;
+  /** Папки, которые не предлагаются в пикере Restore (например, «Шаблоны»). */
+  restoreFolderExclude: string[];
   trashFolder: string;
   trashRetentionDays: number;
   downloadExternalImages: boolean;
@@ -54,16 +58,119 @@ export const DEFAULT_SETTINGS: VaultS3Settings = {
     hashFilenames: true,
     publicUrlStyle: "path",
   },
-  attachmentFolders: ["Картинки", "Attachments", "Файлы"],
+  // Дефолты нейтральные: ничего из личных папок автора. Пользователь задаёт
+  // свои пути, а плагин до этого ищет по точному пути и по имени.
+  attachmentFolders: ["Attachments"],
   ignoreFolders: [".git", ".obsidian", ".trash", ".vault_tools"],
   ignoreFiles: [".gitignore", ".gitkeep", "*.json", "*.yaml", "*.yml", "*.css", "*.js", "database*"],
-  pdfDummyFolder: "Файлы",
+  pdfDummyFolder: "PDF",
+  restoreFolder: "download",
+  restoreFolderExclude: [],
   trashFolder: ".trash",
   trashRetentionDays: 7,
   downloadExternalImages: true,
   externalImageTimeoutSec: 10,
   maxExternalAttempts: 3,
 };
+
+// ── Папка скачивания объектов (Restore) ──────────────────────────────────────
+//
+// Правила (согласованы с ТЗ):
+//   • папка живёт внутри vault и выбирается пользователем;
+//   • её нельзя выбрать внутри папки dummy-PDF и в системных папках — там
+//     скачанные файлы конфликтуют по имени с dummy и ломают рендер;
+//   • внутри папок, которые проходит плагин, скачивать можно, но плагин
+//     предупреждает: при следующем проходе такие файлы будут удалены
+//     (дедупликация/сироты);
+//   • если папка не пересекается с папками плагина, она считается
+//     изолированной: sync её не видит и не удаляет из неё файлы.
+
+/** Имя папки по умолчанию: предлагается в пикере и создаётся при необходимости. */
+export const RESTORE_FOLDER_DEFAULT = "download";
+
+/** Папки, куда скачивать нельзя: системные. */
+export const RESTORE_BLOCKED_FOLDERS = [
+  ".obsidian",
+  ".git",
+  ".trash",
+  ".trash_attachments",
+  ".vault_tools",
+];
+
+export type RestoreFolderState =
+  | "empty" // ещё не задана — будет использована папка по умолчанию
+  | "root" // корень vault
+  | "blocked" // системная папка или папка dummy-PDF
+  | "inside-plugin" // внутри папки, которую проходит плагин
+  | "contains-plugin" // содержит внутри себя папку плагина
+  | "ok";
+
+/** Путь папки: прямые слэши, без ведущих и хвостовых слэшей. */
+export function normalizeFolderPath(raw: string): string {
+  return (raw ?? "").trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+/** a == b, a внутри b или b внутри a. */
+export function foldersOverlap(a: string, b: string): boolean {
+  const x = normalizeFolderPath(a);
+  const y = normalizeFolderPath(b);
+  if (!x || !y) return false;
+  return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+}
+
+/** Папка, которая реально будет использована (с учётом дефолта). */
+export function effectiveRestoreFolder(settings: VaultS3Settings): string {
+  return normalizeFolderPath(settings.restoreFolder ?? "") || RESTORE_FOLDER_DEFAULT;
+}
+
+export function restoreFolderState(path: string, settings: VaultS3Settings): RestoreFolderState {
+  const folder = normalizeFolderPath(path);
+  if (!folder) return "root";
+
+  if (RESTORE_BLOCKED_FOLDERS.some((blocked) => foldersOverlap(folder, blocked))) return "blocked";
+  // Папка dummy-PDF: скачанный PDF получил бы то же имя, что и dummy.
+  if (foldersOverlap(folder, settings.pdfDummyFolder)) return "blocked";
+
+  let containsPlugin = false;
+  for (const name of settings.attachmentFolders ?? []) {
+    const pluginFolder = normalizeFolderPath(name);
+    if (!pluginFolder) continue;
+    if (folder === pluginFolder || folder.startsWith(`${pluginFolder}/`)) return "inside-plugin";
+    if (pluginFolder.startsWith(`${folder}/`)) containsPlugin = true;
+  }
+  return containsPlugin ? "contains-plugin" : "ok";
+}
+
+/** Состояние папки из настроек: пустая настройка — это "empty", а не "root". */
+export function restoreFolderStateOfSettings(settings: VaultS3Settings): RestoreFolderState {
+  const raw = normalizeFolderPath(settings.restoreFolder ?? "");
+  if (!raw) return "empty";
+  return restoreFolderState(raw, settings);
+}
+
+/** Изолированная папка: плагин её не видит и не удаляет из неё файлы. */
+export function isRestoreFolderIsolated(settings: VaultS3Settings): boolean {
+  return restoreFolderState(effectiveRestoreFolder(settings), settings) === "ok";
+}
+
+/** Предупреждение/запрет для UI. Пустая строка — всё в порядке. */
+export function restoreFolderMessage(state: RestoreFolderState): string {
+  switch (state) {
+    case "root":
+      return "Pick a folder inside the vault: the vault root itself cannot be used.";
+    case "blocked":
+      return "This folder is not allowed: it is a system folder or the PDF dummy folder. " +
+        "Downloaded PDFs would collide with dummy files and break rendering.";
+    case "inside-plugin":
+      return "The plugin scans this folder: downloaded files will be deleted on the next sync " +
+        "(deduplication / orphan cleanup). You can re-download them at any time.";
+    case "contains-plugin":
+      return "This folder contains a folder the plugin scans: that subfolder is still processed " +
+        "by sync and cleanup.";
+    default:
+      return "";
+  }
+}
 
 export class VaultS3SettingTab extends PluginSettingTab {
   plugin: VaultS3Plugin;
@@ -126,10 +233,38 @@ export class VaultS3SettingTab extends PluginSettingTab {
     // ── Vault structure ────────────────────────────────────────────────────
     containerEl.createEl("h3", { text: "Vault Structure" });
 
-    new Setting(containerEl).setName("Attachment folders").setDesc("One folder per line (relative to vault root)")
+    const attachmentSetting = new Setting(containerEl).setName("Attachment folders").setDesc("One folder per line (relative to vault root)")
       .addTextArea(t => t.setValue(this.plugin.settings.attachmentFolders.join("\n"))
         .onChange(async v => {
           this.plugin.settings.attachmentFolders = v.split("\n").map(s => s.trim()).filter(Boolean);
+          await this.plugin.saveSettings();
+          renderMissingFolders();
+        }));
+
+    // Маршруты обхода не сверялись с vault: путь мог остаться после удаления
+    // папки, и плагин молча его игнорировал. Показываем такие пути явно.
+    const renderMissingFolders = (): void => {
+      attachmentSetting.descEl.querySelector(".s3sync-restore-warning")?.remove();
+      const missing = this.plugin.settings.attachmentFolders.filter((folder) => {
+        const path = normalizeFolderPath(folder);
+        return path && !(this.app.vault.getAbstractFileByPath(path) instanceof TFolder);
+      });
+      if (missing.length === 0) return;
+      attachmentSetting.descEl.createDiv({
+        cls: "s3sync-restore-warning",
+        text: `Ignored, not found in vault: ${missing.join(", ")}`,
+      });
+    };
+    renderMissingFolders();
+
+    // Папки, которые не должны предлагаться в пикере Restore.
+    new Setting(containerEl)
+      .setName("Hidden in Restore picker")
+      .setDesc("One folder per line. These folders are not offered as a download destination.")
+      .addTextArea((t) => t
+        .setValue((this.plugin.settings.restoreFolderExclude ?? []).join("\n"))
+        .onChange(async (v) => {
+          this.plugin.settings.restoreFolderExclude = v.split("\n").map((s) => s.trim()).filter(Boolean);
           await this.plugin.saveSettings();
         }));
 
@@ -173,6 +308,39 @@ export class VaultS3SettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         });
       });
+
+    // Папка для команды Restore. Текстовое поле, а не список: папки может ещё
+    // не быть — плагин создаст её сам. Ниже выводится предупреждение, если путь
+    // пересекается с папками плагина или недоступен.
+    const restoreSetting = new Setting(containerEl)
+      .setName("Restore folder")
+      .setDesc(
+        `Folder where “Restore current note” saves objects downloaded from the bucket ` +
+        `(default: ${RESTORE_FOLDER_DEFAULT}). The folder is created automatically. ` +
+        `Keep it outside the plugin folders below — otherwise the plugin will delete ` +
+        `downloaded files on the next sync.`
+      )
+      .addText((t) => t
+        .setPlaceholder(RESTORE_FOLDER_DEFAULT)
+        .setValue(this.plugin.settings.restoreFolder)
+        .onChange(async (v) => {
+          // Пустое значение означает «использовать папку по умолчанию».
+          this.plugin.settings.restoreFolder = v.trim();
+          await this.plugin.saveSettings();
+          renderRestoreWarning();
+        }));
+
+    const renderRestoreWarning = (): void => {
+      const state = restoreFolderStateOfSettings(this.plugin.settings);
+      const message = restoreFolderMessage(state);
+      restoreSetting.descEl.querySelector(".s3sync-restore-warning")?.remove();
+      if (!message) return;
+      restoreSetting.descEl.createDiv({
+        cls: `s3sync-restore-warning${state === "blocked" || state === "root" ? " s3sync-restore-warning-error" : ""}`,
+        text: message,
+      });
+    };
+    renderRestoreWarning();
 
     new Setting(containerEl).setName("Ignore folders").setDesc("One folder per line")
       .addTextArea(t => t.setValue(this.plugin.settings.ignoreFolders.join("\n"))

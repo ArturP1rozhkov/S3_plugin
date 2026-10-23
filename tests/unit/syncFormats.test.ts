@@ -6,6 +6,14 @@ import { md5Buffer } from "../../src/engine/md5";
 import { publicUrl } from "../../src/s3Client";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 
+// Тесты используют фиксированную раскладку ("Файлы" — папка вложений и dummy),
+// поэтому настройки заданы явно: дефолты плагина намеренно нейтральные.
+const TEST_SETTINGS = {
+  ...DEFAULT_SETTINGS,
+  attachmentFolders: ["Картинки", "Attachments", "Файлы"],
+  pdfDummyFolder: "Файлы",
+};
+
 vi.mock("obsidian", () => ({
   App: class {},
   Modal: class {},
@@ -165,7 +173,7 @@ describe("processMdFile embed formats", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -191,7 +199,7 @@ describe("processMdFile embed formats", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -213,7 +221,7 @@ describe("processMdFile embed formats", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -235,7 +243,7 @@ describe("processMdFile embed formats", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -267,7 +275,7 @@ describe("processMdFile S3 deduplication", () => {
 
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -297,7 +305,7 @@ describe("processMdFile non-embed wiki-link attachments", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -324,7 +332,7 @@ describe("processMdFile non-embed wiki-link attachments", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -346,7 +354,7 @@ describe("processMdFile non-embed wiki-link attachments", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -396,7 +404,7 @@ describe("processMdFile PDF handling", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -428,7 +436,7 @@ describe("processMdFile PDF handling", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -460,7 +468,7 @@ describe("processMdFile PDF handling", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -504,7 +512,7 @@ describe("processMdFile PDF handling", () => {
     // First sync run
     const changes1 = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       state,
       mdFile,
@@ -536,7 +544,7 @@ describe("processMdFile PDF handling", () => {
     // Second sync run: must be a no-op (idempotent)
     const changes2 = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       state,
       mdFile,
@@ -576,7 +584,7 @@ describe("processMdFile PDF handling", () => {
     const client = makeClient();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,
@@ -684,7 +692,7 @@ describe("processMdFile PDF regression (real vault layout)", () => {
 
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       makeClient(),
       state,
       mdFile,
@@ -718,7 +726,7 @@ describe("processMdFile PDF regression (real vault layout)", () => {
     });
 
     await expect(
-      (processMdFile as any)(app, DEFAULT_SETTINGS, makeClient(), makeState(), mdFile, makeLogger())
+      (processMdFile as any)(app, TEST_SETTINGS, makeClient(), makeState(), mdFile, makeLogger())
     ).rejects.toThrow("write conflict");
 
     expect(app.vault.delete).not.toHaveBeenCalled();
@@ -735,7 +743,7 @@ describe("processMdFile PDF regression (real vault layout)", () => {
 
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       makeClient(),
       makeState(),
       mdFile,
@@ -762,7 +770,7 @@ describe("processMdFile S3 key canonicalization", () => {
 
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       makeClient(),
       makeState(),
       mdFile,
@@ -783,7 +791,7 @@ describe("processMdFile S3 key canonicalization", () => {
   it("keeps the source name when hash filenames are disabled", async () => {
     const content = "same-bytes";
     const settings = {
-      ...DEFAULT_SETTINGS,
+      ...TEST_SETTINGS,
       s3: { ...DEFAULT_SETTINGS.s3, hashFilenames: false },
     };
     const { app, mdFile } = makeAppWithFiles(
@@ -811,7 +819,7 @@ describe("processMdFile S3 key canonicalization", () => {
 describe("processMdFile normalization of already-S3 media refs", () => {
   const base = "http://127.0.0.1:9000/obsidian-plugin-test";
   const settings = {
-    ...DEFAULT_SETTINGS,
+    ...TEST_SETTINGS,
     s3: { ...DEFAULT_SETTINGS.s3, publicEndpoint: base, bucket: "obsidian-plugin-test" },
   };
   const mp4 = `${base}/media/737f3370db5b06d4b5465358e8957551.mp4`;
@@ -884,7 +892,7 @@ describe("processMdFile local file removal", () => {
 
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       makeClient(),
       makeState(),
       mdFile,
@@ -913,7 +921,7 @@ describe("processMdFile link mode independence", () => {
     const logger = makeLogger();
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       makeClient(),
       makeState(),
       mdFile,
@@ -963,7 +971,7 @@ describe("processMdFile link mode independence", () => {
 
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       makeClient(),
       makeState(),
       mdFile,
@@ -977,7 +985,7 @@ describe("processMdFile link mode independence", () => {
 
   it("never uploads or rewrites external links, even with the setting enabled", async () => {
     const settings = {
-      ...DEFAULT_SETTINGS,
+      ...TEST_SETTINGS,
       downloadExternalImages: true,
     };
     const { app, mdFile } = makeAppWithFiles(
@@ -1016,7 +1024,7 @@ describe("processMdFile link mode independence", () => {
 
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       makeClient(),
       makeState(),
       mdFile,
@@ -1049,7 +1057,7 @@ describe("processMdFile bracketed file names", () => {
 
     const changes = await (processMdFile as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       client,
       makeState(),
       mdFile,

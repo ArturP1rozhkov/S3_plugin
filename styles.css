@@ -20,6 +20,31 @@
   font-size: var(--font-small);
   margin-top: var(--size-4-1);
 }
+/* Поясняющая строка под подзаголовком: куда сохранены скачанные файлы и т.п. */
+.s3sync-result-hint {
+  color: var(--text-faint);
+  font-size: var(--font-small);
+  font-style: italic;
+  margin-top: var(--size-2-1);
+  word-break: break-word;
+}
+
+/* Restore: выбор папки назначения */
+.s3sync-restore-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-4-2);
+  margin-top: var(--size-4-3);
+  padding: var(--size-4-3);
+  background: var(--background-secondary);
+  border-radius: var(--radius-m);
+}
+.s3sync-restore-hint { color: var(--text-muted); font-size: var(--font-small); }
+.s3sync-restore-input { width: 100%; }
+.s3sync-restore-row { display: flex; align-items: center; gap: var(--size-4-2); font-size: var(--font-small); }
+.s3sync-restore-warning { color: var(--text-warning); font-size: var(--font-small); }
+.s3sync-restore-warning-error { color: var(--text-error); font-weight: 600; }
+.s3sync-restore-warning:empty { display: none; }
 .s3sync-result-section { margin-top: var(--size-4-3); }
 .s3sync-result-summary {
   cursor: pointer;

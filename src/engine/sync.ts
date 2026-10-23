@@ -1,7 +1,13 @@
 import { App, Notice, TFile, normalizePath } from "obsidian";
-import type { VaultS3Settings } from "../settings";
+import {
+  effectiveRestoreFolder,
+  isRestoreFolderIsolated,
+  normalizeFolderPath,
+  type VaultS3Settings,
+} from "../settings";
 import type { SyncState } from "../state";
 import { createS3Client, publicUrl, uploadBuffer, headObject } from "../s3Client";
+import { resolveRefFile } from "./resolveFile";
 import {
   parseAllAttachmentRefs,
   parseAllRefs,
@@ -50,26 +56,38 @@ function isIgnoredFile(name: string, ignoreFiles: string[]): boolean {
   return false;
 }
 
+/**
+ * Ищет локальный файл для ссылки: точный путь → папки вложений → по имени.
+ *
+ * Важно: если папка для скачивания объектов (Restore) не пересекается с
+ * папками плагина, её файлы здесь не рассматриваются вообще. Иначе скачанная
+ * копия могла бы «перехватить» ссылку у dummy-PDF (имена совпадают) и была бы
+ * удалена как обработанное локальное вложение.
+ */
 function resolveLocalRef(
   app: App,
   ref: string,
-  attachmentFolders: string[]
+  settings: VaultS3Settings
 ): TFile | null {
-  const { path: cleanPath } = splitRef(ref);
+  const restorePrefix = isolatedRestorePrefix(settings);
+  return resolveRefFile(app, ref, {
+    attachmentFolders: settings.attachmentFolders ?? [],
+    pdfDummyFolder: settings.pdfDummyFolder,
+    isExcluded: restorePrefix ? (path) => isInsideFolder(path, restorePrefix) : undefined,
+  });
+}
 
-  const direct = app.vault.getAbstractFileByPath(normalizePath(cleanPath));
-  if (direct instanceof TFile) return direct;
+/** Префикс изолированной папки Restore или "" если изоляции нет. */
+function isolatedRestorePrefix(settings: VaultS3Settings): string {
+  if (!isRestoreFolderIsolated(settings)) return "";
+  const folder = normalizeFolderPath(effectiveRestoreFolder(settings));
+  return folder ? `${folder}/` : "";
+}
 
-  const filename = refFilename(ref);
-  for (const folder of attachmentFolders) {
-    const candidate = app.vault.getAbstractFileByPath(
-      normalizePath(`${folder}/${filename}`)
-    );
-    if (candidate instanceof TFile) return candidate;
-  }
-
-  const found = app.vault.getFiles().find((f) => f.name === filename);
-  return found ?? null;
+/** Лежит ли путь внутри папки с префиксом `folder/`. */
+function isInsideFolder(path: string, folderPrefix: string): boolean {
+  const normalized = normalizeFolderPath(path);
+  return normalized === folderPrefix.replace(/\/$/, "") || normalized.startsWith(folderPrefix);
 }
 
 export type UploadResult =
@@ -78,18 +96,21 @@ export type UploadResult =
   | { status: "error"; reason: string };
 
 /**
- * Повторяет сетевую операцию при временном сбое (rustfs/S3 иногда отдаёт
- * «Failed to fetch» на большом теле запроса). Тело запроса уже в памяти,
- * поэтому повтор дешёвый.
+ * Повторяет сетевую операцию при временном сбое (S3 иногда отдаёт
+ * «Failed to fetch» — обрыв на транспорте; Chromium при этом ещё и пишет
+ * «blocked by CORS policy», хотя CORS ни при чём). Тело запроса уже в памяти,
+ * поэтому повтор дешёвый. Задержка растёт: 400 мс, 1000 мс, 2000 мс…
  */
-async function withRetry<T>(fn: () => Promise<T>, attempts = 2): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastErr = err;
-      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 300));
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 400 * attempt + 200));
+      }
     }
   }
   throw lastErr;
@@ -118,9 +139,18 @@ async function uploadFile(
     const folderMap = settings.s3.folderMap ?? DEFAULT_FOLDER_MAP;
     const key = s3Key(folderMap, filename, keyExt);
 
-    // Проверяем, нет ли уже в S3 идентичного объекта (по ключу/ETag/размеру),
-    // чтобы избежать повторной загрузки того же файла.
-    const existing = await withRetry(() => headObject(client, settings.s3, key));
+    // Проверяем, нет ли уже в S3 идентичного объекта (по ключу/ETag/размеру).
+    //
+    // HEAD — это только оптимизация: если он не прошёл из-за обрыва сети (а
+    // Chromium в таком случае показывает ещё и «blocked by CORS policy», хотя
+    // дело не в CORS), загрузку всё равно пробуем. Иначе один сетевой сбой
+    // делает файл «незагружаемым» навсегда и обрывает создание dummy для PDF.
+    let existing: Awaited<ReturnType<typeof headObject>> = null;
+    try {
+      existing = await withRetry(() => headObject(client, settings.s3, key), 3);
+    } catch (err) {
+      console.warn(`[S3 Sync] HEAD failed for ${key}, uploading anyway: ${err}`);
+    }
     if (
       existing &&
       existing.ContentLength === buf.byteLength &&
@@ -250,15 +280,22 @@ async function removeLocalFile(app: App, file: TFile, logger: SyncLogger): Promi
 async function flushPendingDeletions(
   app: App,
   state: SyncState,
-  logger: SyncLogger
+  logger: SyncLogger,
+  settings: VaultS3Settings
 ): Promise<{ done: number; pending: number }> {
   const queue = state.pendingDeletions ?? [];
   if (queue.length === 0) return { done: 0, pending: 0 };
 
   const still: PendingDeletion[] = [];
+  const restorePrefix = isolatedRestorePrefix(settings);
   let done = 0;
 
   for (const entry of queue) {
+    // Файл оказался в изолированной папке Restore — плагин её не трогает.
+    if (restorePrefix && isInsideFolder(entry.path, restorePrefix)) {
+      done++;                       // запись из очереди убираем, файл не удаляем
+      continue;
+    }
     const file = app.vault.getAbstractFileByPath(entry.path);
     if (!(file instanceof TFile)) {
       done++;                       // файла уже нет — запись не нужна
@@ -336,7 +373,7 @@ export async function processMdFile(
 
     // ── Local file ───────────────────────────────────────────────────────────
     {
-      localFile = resolveLocalRef(app, ref, settings.attachmentFolders);
+      localFile = resolveLocalRef(app, ref, settings);
       if (!localFile) {
         // Ссылка в заметке есть, но файла нет ни по указанному пути, ни в
         // attachment-папках, ни в индексе vault. Раньше это пропускалось молча:
@@ -502,7 +539,7 @@ export async function cmdSync(
 
   // Добиваем удаления, не прошедшие в прошлые прогоны: к этому моменту
   // Obsidian обычно уже отпустил файлы, которые держал плеер.
-  const flushed = await flushPendingDeletions(app, state, failedLog);
+  const flushed = await flushPendingDeletions(app, state, failedLog, settings);
   if (flushed.done > 0 || flushed.pending > 0) {
     log.info(`Deferred deletions: ${flushed.done} removed, ${flushed.pending} still locked`);
   }

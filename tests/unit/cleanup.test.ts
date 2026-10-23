@@ -3,6 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { cmdCleanup } from "../../src/engine/cleanup";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 
+// Тесты работают с фиксированной раскладкой ("Файлы" — и папка вложений, и
+// папка dummy), поэтому настройки задаются явно, а не берутся из дефолтов
+// плагина: дефолты намеренно нейтральные и не содержат личных папок.
+const TEST_SETTINGS = {
+  ...DEFAULT_SETTINGS,
+  attachmentFolders: ["Файлы"],
+  pdfDummyFolder: "Файлы",
+};
+
 vi.mock("obsidian", () => {
   // Универсальный DOM-stub: вложенные createEl/createDiv возвращают такой же stub.
   // Кнопка "Move to trash" в askConfirmation «нажимается» сразу — иначе реальная
@@ -194,7 +203,7 @@ describe("cmdCleanup dummy PDF protection", () => {
       },
     ]);
 
-    const result = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, { processed: {}, failedExternal: {} }, true);
+    const result = await (cmdCleanup as any)(app, TEST_SETTINGS, { processed: {}, failedExternal: {} }, true);
     expect(result.orphans).toBe(1); // only orphan.pdf
   });
 
@@ -213,7 +222,7 @@ describe("cmdCleanup dummy PDF protection", () => {
       },
     ]);
 
-    const result = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, { processed: {}, failedExternal: {} }, true);
+    const result = await (cmdCleanup as any)(app, TEST_SETTINGS, { processed: {}, failedExternal: {} }, true);
     expect(result.orphans).toBe(1);
   });
 
@@ -253,7 +262,7 @@ describe("cmdCleanup real move to trash", () => {
     ]);
 
     // .trash ещё нет в индексе → ensureFolderExists вызовет mkdir, который упадёт
-    const res = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, state, false);
+    const res = await (cmdCleanup as any)(app, TEST_SETTINGS, state, false);
 
     expect(app.vault.adapter.mkdir).toHaveBeenCalled();
     expect(res.moved).toBe(1);
@@ -268,7 +277,7 @@ describe("cmdCleanup real move to trash", () => {
     ]);
     app.vault.rename.mockRejectedValue(new Error("Folder does not exist"));
 
-    const res = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, state, false);
+    const res = await (cmdCleanup as any)(app, TEST_SETTINGS, state, false);
 
     expect(res.moved).toBe(1);
     expect(app.vault.adapter.rename).toHaveBeenCalledWith("Файлы/cold.jpg", ".trash/cold.jpg");
@@ -283,7 +292,7 @@ describe("cmdCleanup real move to trash", () => {
       { name: "cold.jpg", content: "old-trash-copy", folder: ".trash" },
     ]);
 
-    const res = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, state, false);
+    const res = await (cmdCleanup as any)(app, TEST_SETTINGS, state, false);
 
     expect(res.moved).toBe(1);
     expect(app.vault.rename).toHaveBeenCalledWith(expect.anything(), ".trash/cold 2.jpg");
@@ -300,7 +309,7 @@ describe("cmdCleanup real move to trash", () => {
     app.vault.adapter.rename.mockRejectedValue(new Error("nope"));
     app.vault.adapter.writeBinary.mockRejectedValue(new Error("nope"));
 
-    const res = await (cmdCleanup as any)(app, DEFAULT_SETTINGS, state, false);
+    const res = await (cmdCleanup as any)(app, TEST_SETTINGS, state, false);
 
     expect(res.moved).toBe(0);
     expect(contents.has("Файлы/cold.jpg")).toBe(true); // файл не потерян
@@ -316,7 +325,7 @@ describe("cmdCleanup URL-encoded references", () => {
 
     const res = await (cmdCleanup as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       { processed: {}, failedExternal: {} },
       true
     );
@@ -336,7 +345,7 @@ describe("cmdCleanup with nothing to move", () => {
 
     const res = await (cmdCleanup as any)(
       app,
-      DEFAULT_SETTINGS,
+      TEST_SETTINGS,
       { processed: {}, failedExternal: {} },
       false
     );
