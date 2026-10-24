@@ -1,7 +1,7 @@
 {
   "id": "vault-s3-sync",
   "name": "Vault S3 Sync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.4.0",
   "description": "Upload vault attachments (images, video, audio, PDF, docs) to S3-compatible storage and replace local links in notes.",
   "author": "arturpirozhkov",
