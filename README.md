@@ -767,6 +767,27 @@ npm run test:watch
 - **KMS не поддерживается осознанно**: с ключом KMS анонимный `GET` обычно получает `403`
   (нужен `kms:Decrypt`), и картинки в заметках перестанут открываться.
 
+#### Проверено на практике: cloud.ru не принимает этот заголовок
+
+```
+PUT media/…jpg + x-amz-server-side-encryption: AES256
+→ 400 InvalidArgument
+  «Requests specifying Server Side Encryption with Customer provided keys
+   must provide a valid encryption algorithm»
+```
+
+Хранилище трактует заголовок как SSE-C и отвечает `400`. Поэтому:
+
+| Хранилище | Что ставить в настройке |
+|---|---|
+| cloud.ru / SberCloud | **None** (шифрование — только default-encryption на бакете, если доступно в консоли) |
+| AWS S3, MinIO, RustFS | `SSE-S3` работает штатно |
+
+Плагин подстрахован: если хранилище отвергает шифрование, файл всё равно загружается —
+без заголовка, а в консоль пишется предупреждение
+`Storage rejected server-side encryption … uploaded without encryption`. Молча понижать
+защиту плагин не должен, поэтому предупреждение видно в `Ctrl+Shift+I`.
+
 Проверка после включения (одна команда на любом объекте):
 
 ```bash
