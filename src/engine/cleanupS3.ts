@@ -2,7 +2,7 @@
 
 import { App, Modal, Notice, TFile, TFolder } from "obsidian";
 import type { VaultS3Settings } from "../settings";
-import { createS3Client, listAllObjects, moveObject, deleteObject } from "../s3Client";
+import { createS3Client, listAllObjects, moveObject, deleteObject, serverSideEncryption } from "../s3Client";
 import { extractPdfUrl } from "./pdfDummy";
 import { ResultModal, type ResultData, type ResultList } from "./status";
 
@@ -201,7 +201,7 @@ export async function cmdCleanupS3(
                 // Оригинальный путь в имени: "media/abc.jpg" → "quarantine/media_abc.jpg"
                 const quarantineKey = quarantinePrefix + obj.key.replace(/\//g, "_");
                 try {
-                  await moveObject(client, s3.bucket, obj.key, quarantineKey);
+                  await moveObject(client, s3.bucket, obj.key, quarantineKey, serverSideEncryption(s3));
                   console.log(`[S3 CleanupS3] → quarantine: ${obj.key}`);
                   moved++;
                 } catch (err) {

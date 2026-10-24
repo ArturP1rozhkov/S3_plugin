@@ -23,6 +23,22 @@ export function createS3Client(cfg: S3Config): S3Client {
   });
 }
 
+/**
+ * Шифрование на стороне провайдера.
+ *
+ * `SSE-S3` = `AES256`: хранилище шифрует объект у себя и расшифровывает при
+ * чтении, поэтому публичные ссылки и рендер в заметках продолжают работать.
+ *
+ * KMS намеренно не поддерживается: с ключом KMS анонимный `GET` обычно получает
+ * 403 (нужен `kms:Decrypt`), то есть картинки в заметках перестанут открываться.
+ */
+export type S3Encryption = "none" | "SSE-S3";
+
+/** Значение заголовка `x-amz-server-side-encryption` (undefined — не задавать). */
+export function serverSideEncryption(cfg: S3Config): "AES256" | undefined {
+  return cfg.encryption === "SSE-S3" ? "AES256" : undefined;
+}
+
 export function publicUrl(cfg: S3Config, key: string): string {
   const base = cfg.publicEndpoint.replace(/\/+$/, "");
   if (cfg.publicUrlStyle === "virtual-host") {
@@ -39,12 +55,14 @@ export async function uploadBuffer(
   contentType: string,
   metadata: Record<string, string> = {}
 ): Promise<void> {
+  const encryption = serverSideEncryption(cfg);
   await client.send(new PutObjectCommand({
     Bucket: cfg.bucket,
     Key: key,
     Body: body,
     ContentType: contentType,
     Metadata: metadata,
+    ...(encryption ? { ServerSideEncryption: encryption } : {}),
   }));
 }
 
@@ -92,10 +110,12 @@ export async function moveObject(
   client: S3Client,
   bucket: string,
   fromKey: string,
-  toKey: string
+  toKey: string,
+  encryption?: "AES256"
 ): Promise<void> {
   await client.send(new CopyObjectCommand({
     Bucket: bucket, CopySource: `${bucket}/${fromKey}`, Key: toKey, MetadataDirective: "COPY",
+    ...(encryption ? { ServerSideEncryption: encryption } : {}),
   }));
   await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: fromKey }));
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { publicUrl } from "../../src/s3Client";
+import { publicUrl, serverSideEncryption } from "../../src/s3Client";
 import type { S3Config } from "../../src/settings";
 
 const baseCfg: S3Config = {
@@ -16,7 +16,24 @@ const baseCfg: S3Config = {
   imageMaxPx: 1920,
   hashFilenames: true,
   publicUrlStyle: "path",
+  encryption: "none",
 };
+
+describe("serverSideEncryption", () => {
+  it("returns undefined when encryption is off", () => {
+    expect(serverSideEncryption(baseCfg)).toBeUndefined();
+  });
+
+  it("returns AES256 for SSE-S3", () => {
+    expect(serverSideEncryption({ ...baseCfg, encryption: "SSE-S3" })).toBe("AES256");
+  });
+
+  it("treats a missing value as off (old data.json)", () => {
+    const cfg = { ...baseCfg } as S3Config;
+    delete (cfg as Partial<S3Config>).encryption;
+    expect(serverSideEncryption(cfg)).toBeUndefined();
+  });
+});
 
 describe("publicUrl", () => {
   it("path style: inserts bucket between publicEndpoint and key", () => {

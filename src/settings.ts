@@ -15,6 +15,8 @@ export interface S3Config {
   imageMaxPx: number;
   hashFilenames: boolean;
   publicUrlStyle: "path" | "virtual-host";
+  /** Шифрование на стороне провайдера: "none" или "SSE-S3" (AES256). */
+  encryption: "none" | "SSE-S3";
 }
 
 export interface VaultS3Settings {
@@ -57,6 +59,7 @@ export const DEFAULT_SETTINGS: VaultS3Settings = {
     imageMaxPx: 1920,
     hashFilenames: true,
     publicUrlStyle: "path",
+    encryption: "none",
   },
   // Дефолты нейтральные: ничего из личных папок автора. Пользователь задаёт
   // свои пути, а плагин до этого ищет по точному пути и по имени.
@@ -229,6 +232,25 @@ export class VaultS3SettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Region").addText(t => t
         .setValue(this.plugin.settings.s3.region)
         .onChange(async v => { this.plugin.settings.s3.region = v.trim(); await this.plugin.saveSettings(); }));
+
+    // Шифрование на стороне провайдера. SSE-S3 прозрачно для чтения: объект
+    // расшифровывается хранилищем, поэтому публичные ссылки продолжают работать.
+    // KMS не предлагаем: анонимный GET с ним обычно получает 403.
+    new Setting(containerEl)
+      .setName("Server-side encryption")
+      .setDesc(
+        "SSE-S3 (AES256) encrypts objects at rest inside the storage; public links and " +
+        "rendering keep working because the storage decrypts on read. Applies to newly " +
+        "uploaded objects only. KMS keys are not supported: anonymous reads usually fail with 403."
+      )
+      .addDropdown((d) => d
+        .addOption("none", "None")
+        .addOption("SSE-S3", "SSE-S3 (AES256)")
+        .setValue(this.plugin.settings.s3.encryption ?? "none")
+        .onChange(async (v) => {
+          this.plugin.settings.s3.encryption = v as "none" | "SSE-S3";
+          await this.plugin.saveSettings();
+        }));
 
     // ── Vault structure ────────────────────────────────────────────────────
     containerEl.createEl("h3", { text: "Vault Structure" });
