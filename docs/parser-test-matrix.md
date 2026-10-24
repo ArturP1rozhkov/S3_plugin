@@ -38,7 +38,7 @@
 | `![x](https://example.com/a.jpg)` | `md-embed` | `https://example.com/a.jpg` | `a.jpg` | `` | `` | **no** | no | unchanged (внешние ссылки не скачиваем) |
 | `[x](https://example.com/a.pdf)` | `md-link` | `https://example.com/a.pdf` | `a.pdf` | `` | `` | **no** | no | unchanged |
 | `<img src="https://example.com/a.jpg">` | `html-img` | `https://example.com/a.jpg` | `a.jpg` | `` | `` | **no** | no | unchanged |
-| `![x](https://arturpirozhkov.s3.cloud.ru/media/a.jpg)` | `md-embed` | `https://arturpirozhkov.s3.cloud.ru/media/a.jpg` | `a.jpg` | `` | `` | no | n/a | unchanged |
+| `![x](https://my-bucket.s3.cloud.ru/media/a.jpg)` | `md-embed` | `https://my-bucket.s3.cloud.ru/media/a.jpg` | `a.jpg` | `` | `` | no | n/a | unchanged |
 | `[[файл с кириллицей.png]]` | `wiki-link` | `файл с кириллицей.png` | `файл с кириллицей.png` | `` | `` | yes | yes | image embed `![|W](url)` |
 | `[[folder/file name with spaces.jpg]]` | `wiki-link` | `folder/file name with spaces.jpg` | `file name with spaces.jpg` | `` | `` | yes | yes | image embed `![|W](url)` |
 
@@ -50,8 +50,8 @@
 | `[[1]](#fn-1)` | ссылка-сноска, не attachment | ignore for attachment pipeline |
 | `[[note]]` | wiki link на заметку без attachment extension | ignore for attachment pipeline |
 | `![text](#anchor)` | fragment-only markdown link | ignore for attachment pipeline |
-| `![[https://arturpirozhkov.s3.cloud.ru/media/a.jpg]]` | wiki embed с внешним URL невалиден как output | never generate |
-| `![[https://arturpirozhkov.s3.cloud.ru/docs/a.pdf]]` | wiki embed с внешним URL невалиден как output | never generate |
+| `![[https://my-bucket.s3.cloud.ru/media/a.jpg]]` | wiki embed с внешним URL невалиден как output | never generate |
+| `![[https://my-bucket.s3.cloud.ru/docs/a.pdf]]` | wiki embed с внешним URL невалиден как output | never generate |
 
 ## Канонические выходные форматы
 
