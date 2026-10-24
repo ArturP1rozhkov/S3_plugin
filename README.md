@@ -788,6 +788,26 @@ PUT media/…jpg + x-amz-server-side-encryption: AES256
 `Storage rejected server-side encryption … uploaded without encryption`. Молча понижать
 защиту плагин не должен, поэтому предупреждение видно в `Ctrl+Shift+I`.
 
+#### Чек-лист настройки cloud.ru (проверено на живом бакете)
+
+1. **Bucket Policy** — включён «Публичный доступ к бакету», политика даёт
+   `s3:GetObject` (например на `arn:aws:s3:::bucket/*`). Без этого рендер получает `403`.
+2. **Правила CORS** — источники `*`, методы `GET/PUT/HEAD/POST/DELETE`, заголовки запроса `*`.
+3. **Заголовки ответа (ExposeHeaders)** — обязательно **`ETag`** и
+   **`x-amz-meta-original-name`**. Без них рендерер не видит ни `ETag` (дедупликация
+   перестаёт работать), ни исходные имена файлов при Restore. Проверка:
+
+   ```bash
+   curl -sI -H "Origin: app://obsidian.md" \
+     "https://<bucket>.s3.cloud.ru/<key>" | grep -i -E "access-control-expose|etag"
+   ```
+
+   Ожидаемо: `access-control-expose-headers: ETag,x-amz-meta-original-name`.
+4. **Server-side encryption** — `None`: cloud.ru отвечает `400 InvalidArgument` на заголовок
+   и `501 NotImplemented` на шифрование по умолчанию у бакета.
+5. После правки CORS подождать кеширование preflight (по умолчанию 300 с) или перезагрузить
+   Obsidian.
+
 Проверка после включения (одна команда на любом объекте):
 
 ```bash
