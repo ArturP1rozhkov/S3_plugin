@@ -64,6 +64,38 @@
 
 ## Установка
 
+### Установка через BRAT (для любого пользователя)
+
+Плагин ставится по BRAT из релизов репозитория — вручную собирать ничего не нужно.
+
+1. Установить **Obsidian42 - BRAT** из Community plugins и включить его.
+2. `Ctrl+P → BRAT: Add a beta plugin for testing`.
+3. Вставить URL репозитория: `https://github.com/ArturP1rozhkov/S3_plugin`.
+4. BRAT скачает из **последнего релиза** три файла (`main.js`, `manifest.json`, `styles.css`)
+   и положит их в `.obsidian/plugins/vault-s3-sync/`.
+5. Включить **Vault S3 Sync** в `Settings → Community plugins`.
+
+Проверка, что релиз опубликован корректно (обе ссылки должны отдавать файл):
+
+```
+https://github.com/ArturP1rozhkov/S3_plugin/releases/latest/download/manifest.json
+https://github.com/ArturP1rozhkov/S3_plugin/releases/latest/download/main.js
+```
+
+> `main.js` — артефакт сборки и в git не хранится, поэтому BRAT берёт его из релиза.
+> Режим «beta-плагин из корня репозитория» с этим репозиторием не сработает.
+
+### Релиз и артефакты (мейнтейнеру)
+
+Тег сам по себе файлов не содержит — ассеты прикладываются к релизу:
+
+1. Собрать бандл: `npm run build` (в корне появляется `main.js`).
+2. `git tag -a v0.2.0 -m "v0.2.0"` и `git push origin v0.2.0`.
+3. GitHub → **Releases → Draft a new release** → выбрать тег `v0.2.0` → заголовок → описание.
+4. В **Attach binaries** приложить `main.js`, `manifest.json`, `styles.css`.
+   Автоматические `Source code (zip/tar.gz)` для установки **не подходят** — в них нет `main.js`.
+5. **Publish release**.
+
 ### Сборка из исходников
 
 ```bash
