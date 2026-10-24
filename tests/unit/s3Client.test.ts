@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { publicUrl, serverSideEncryption } from "../../src/s3Client";
+import { describe, expect, it, vi } from "vitest";
+import { publicUrl, serverSideEncryption, uploadBuffer } from "../../src/s3Client";
 import type { S3Config } from "../../src/settings";
 
 const baseCfg: S3Config = {
@@ -18,6 +18,70 @@ const baseCfg: S3Config = {
   publicUrlStyle: "path",
   encryption: "none",
 };
+
+describe("uploadBuffer encryption fallback", () => {
+  function fakeClient(onSend: (input: any) => void) {
+    const calls: any[] = [];
+    return {
+      calls,
+      client: {
+        send: async (cmd: any) => {
+          calls.push(cmd.input);
+          onSend(cmd.input);
+          return {};
+        },
+      } as any,
+    };
+  }
+
+  function encryptionError(): any {
+    const err: any = new Error(
+      "Requests specifying Server Side Encryption with Customer provided keys must provide a valid encryption algorithm"
+    );
+    err.name = "InvalidArgument";
+    err.$metadata = { httpStatusCode: 400 };
+    return err;
+  }
+
+  it("sends AES256 when encryption is enabled", async () => {
+    const { client, calls } = fakeClient(() => {});
+    const result = await uploadBuffer(
+      client, { ...baseCfg, encryption: "SSE-S3" }, "media/a.jpg", new Uint8Array([1]), "image/jpeg"
+    );
+    expect(result.encryptionApplied).toBe(true);
+    expect(calls[0].ServerSideEncryption).toBe("AES256");
+  });
+
+  it("retries without encryption when the storage rejects the header", async () => {
+    const { client, calls } = fakeClient((input) => {
+      if (input.ServerSideEncryption) throw encryptionError();
+    });
+    const result = await uploadBuffer(
+      client, { ...baseCfg, encryption: "SSE-S3" }, "media/a.jpg", new Uint8Array([1]), "image/jpeg"
+    );
+    expect(result.encryptionApplied).toBe(false);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].ServerSideEncryption).toBeUndefined();
+  });
+
+  it("does not swallow unrelated errors", async () => {
+    const { client } = fakeClient(() => {
+      const err: any = new Error("Forbidden");
+      err.name = "AccessDenied";
+      err.$metadata = { httpStatusCode: 403 };
+      throw err;
+    });
+    await expect(
+      uploadBuffer(client, { ...baseCfg, encryption: "SSE-S3" }, "k", new Uint8Array([1]), "text/plain")
+    ).rejects.toThrow("Forbidden");
+  });
+
+  it("sends nothing extra when encryption is off", async () => {
+    const { client, calls } = fakeClient(() => {});
+    await uploadBuffer(client, baseCfg, "k", new Uint8Array([1]), "text/plain");
+    expect(calls[0].ServerSideEncryption).toBeUndefined();
+  });
+});
 
 describe("serverSideEncryption", () => {
   it("returns undefined when encryption is off", () => {

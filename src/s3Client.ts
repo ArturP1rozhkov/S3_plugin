@@ -39,12 +39,18 @@ export function serverSideEncryption(cfg: S3Config): "AES256" | undefined {
   return cfg.encryption === "SSE-S3" ? "AES256" : undefined;
 }
 
-export function publicUrl(cfg: S3Config, key: string): string {
-  const base = cfg.publicEndpoint.replace(/\/+$/, "");
-  if (cfg.publicUrlStyle === "virtual-host") {
-    return `${base}/${key}`;
-  }
-  return `${base}/${cfg.bucket}/${key}`;
+/**
+ * Хранилище отказалось принимать шифрование объекта.
+ *
+ * cloud.ru, например, отвечает `400 InvalidArgument` с текстом про
+ * «Customer provided keys» — то есть не поддерживает SSE-S3 через этот
+ * заголовок. В таком случае загружать файл всё равно нужно: без шифрования.
+ */
+export function isEncryptionRejected(err: unknown): boolean {
+  const e = err as any;
+  const status = e?.$metadata?.httpStatusCode;
+  const text = `${e?.name ?? ""} ${e?.code ?? ""} ${e?.message ?? ""}`;
+  return status === 400 && /InvalidArgument|encryption/i.test(text) && /encrypt/i.test(text);
 }
 
 export async function uploadBuffer(
@@ -54,16 +60,47 @@ export async function uploadBuffer(
   body: Uint8Array,
   contentType: string,
   metadata: Record<string, string> = {}
-): Promise<void> {
+): Promise<{ encryptionApplied: boolean }> {
+  const send = async (serverSide?: "AES256"): Promise<void> => {
+    await client.send(new PutObjectCommand({
+      Bucket: cfg.bucket,
+      Key: key,
+      Body: body,
+      ContentType: contentType,
+      Metadata: metadata,
+      ...(serverSide ? { ServerSideEncryption: serverSide } : {}),
+    }));
+  };
+
   const encryption = serverSideEncryption(cfg);
-  await client.send(new PutObjectCommand({
-    Bucket: cfg.bucket,
-    Key: key,
-    Body: body,
-    ContentType: contentType,
-    Metadata: metadata,
-    ...(encryption ? { ServerSideEncryption: encryption } : {}),
-  }));
+  if (!encryption) {
+    await send();
+    return { encryptionApplied: false };
+  }
+
+  try {
+    await send(encryption);
+    return { encryptionApplied: true };
+  } catch (err) {
+    if (!isEncryptionRejected(err)) throw err;
+    // Откатываемся на загрузку без шифрования, но громко сообщаем об этом:
+    // молча понижать защиту нельзя.
+    console.warn(
+      `[S3] Storage rejected server-side encryption for "${key}" ` +
+      `(${(err as any)?.message ?? err}); uploaded without encryption. ` +
+      `Set "Server-side encryption" to None to avoid the extra request.`
+    );
+    await send();
+    return { encryptionApplied: false };
+  }
+}
+
+export function publicUrl(cfg: S3Config, key: string): string {
+  const base = cfg.publicEndpoint.replace(/\/+$/, "");
+  if (cfg.publicUrlStyle === "virtual-host") {
+    return `${base}/${key}`;
+  }
+  return `${base}/${cfg.bucket}/${key}`;
 }
 
 export async function headObject(
